@@ -8,8 +8,9 @@ and traffic insights.
 import os
 import json
 import logging
+from typing import Any, Optional
+
 import redis
-from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class RedisCache:
     # Default TTL (15 minutes)
     DEFAULT_TTL = 900
     
-    def __init__(self, redis_url: str = None):
+    def __init__(self, redis_url: Optional[str] = None):
         """
         Initialize Redis connection
         
@@ -50,7 +51,7 @@ class RedisCache:
         """Serialize data to JSON string"""
         return json.dumps(data)
     
-    def _deserialize(self, data: str) -> Any:
+    def _deserialize(self, data: Optional[str]) -> Any:
         """Deserialize JSON string to data"""
         if data is None:
             return None
@@ -58,7 +59,7 @@ class RedisCache:
     
     # ==================== Organization Data ====================
     
-    def set_organization(self, org_data: Dict, ttl: int = None) -> bool:
+    def set_organization(self, org_data: dict[str, Any], ttl: Optional[int] = None) -> bool:
         """Store organization data"""
         try:
             self.client.setex(
@@ -71,7 +72,7 @@ class RedisCache:
             logger.error(f"Error storing organization data: {e}")
             return False
     
-    def get_organization(self) -> Optional[Dict]:
+    def get_organization(self) -> Optional[dict[str, Any]]:
         """Retrieve organization data"""
         try:
             data = self.client.get(self.PREFIX_ORG)
@@ -82,7 +83,7 @@ class RedisCache:
     
     # ==================== Sites Data ====================
     
-    def set_sites(self, sites: List[Dict], ttl: int = None) -> bool:
+    def set_sites(self, sites: list[dict[str, Any]], ttl: Optional[int] = None) -> bool:
         """Store sites list"""
         try:
             self.client.setex(
@@ -95,7 +96,7 @@ class RedisCache:
             logger.error(f"Error storing sites data: {e}")
             return False
     
-    def get_sites(self) -> Optional[List[Dict]]:
+    def get_sites(self) -> Optional[list[dict[str, Any]]]:
         """Retrieve sites list"""
         try:
             data = self.client.get(self.PREFIX_SITES)
@@ -106,7 +107,7 @@ class RedisCache:
     
     # ==================== Gateway Data ====================
     
-    def set_gateways(self, gateways: List[Dict], ttl: int = None) -> bool:
+    def set_gateways(self, gateways: list[dict[str, Any]], ttl: Optional[int] = None) -> bool:
         """Store all gateway data"""
         try:
             self.client.setex(
@@ -120,7 +121,7 @@ class RedisCache:
             logger.error(f"Error storing gateway data: {e}")
             return False
     
-    def get_gateways(self) -> Optional[List[Dict]]:
+    def get_gateways(self) -> Optional[list[dict[str, Any]]]:
         """Retrieve all gateway data"""
         try:
             data = self.client.get(self.PREFIX_GATEWAYS)
@@ -131,7 +132,7 @@ class RedisCache:
     
     # ==================== VPN Peer Paths ====================
     
-    def set_vpn_peers(self, gateway_id: str, mac: str, peers_by_port: Dict, ttl: int = None) -> bool:
+    def set_vpn_peers(self, gateway_id: str, mac: str, peers_by_port: dict[str, Any], ttl: Optional[int] = None) -> bool:
         """Store VPN peer paths for a gateway"""
         try:
             key = f"{self.PREFIX_VPN_PEERS}:{gateway_id}:{mac}"
@@ -145,7 +146,7 @@ class RedisCache:
             logger.error(f"Error storing VPN peers for {gateway_id}: {e}")
             return False
     
-    def get_vpn_peers(self, gateway_id: str, mac: str) -> Optional[Dict]:
+    def get_vpn_peers(self, gateway_id: str, mac: str) -> Optional[dict[str, Any]]:
         """Retrieve VPN peer paths for a gateway"""
         try:
             key = f"{self.PREFIX_VPN_PEERS}:{gateway_id}:{mac}"
@@ -155,7 +156,7 @@ class RedisCache:
             logger.error(f"Error retrieving VPN peers for {gateway_id}: {e}")
             return None
     
-    def set_all_vpn_peers(self, all_peers: Dict[str, Dict], ttl: int = None) -> bool:
+    def set_all_vpn_peers(self, all_peers: dict[str, dict[str, Any]], ttl: Optional[int] = None) -> bool:
         """Store all VPN peer paths in a single operation"""
         try:
             pipe = self.client.pipeline()
@@ -169,7 +170,7 @@ class RedisCache:
             logger.error(f"Error storing all VPN peers: {e}")
             return False
     
-    def get_all_vpn_peers(self) -> Dict[str, Dict]:
+    def get_all_vpn_peers(self) -> dict[str, dict[str, Any]]:
         """Retrieve all VPN peer paths"""
         try:
             pattern = f"{self.PREFIX_VPN_PEERS}:*"
@@ -198,7 +199,7 @@ class RedisCache:
     
     # ==================== Traffic Insights ====================
     
-    def set_insights(self, gateway_id: str, port_id: str, insights: Dict, ttl: int = None) -> bool:
+    def set_insights(self, gateway_id: str, port_id: str, insights: dict[str, Any], ttl: Optional[int] = None) -> bool:
         """Store traffic insights for a port"""
         try:
             key = f"{self.PREFIX_INSIGHTS}:{gateway_id}:{port_id}"
@@ -212,7 +213,7 @@ class RedisCache:
             logger.error(f"Error storing insights for {gateway_id}/{port_id}: {e}")
             return False
     
-    def get_insights(self, gateway_id: str, port_id: str) -> Optional[Dict]:
+    def get_insights(self, gateway_id: str, port_id: str) -> Optional[dict[str, Any]]:
         """Retrieve traffic insights for a port"""
         try:
             key = f"{self.PREFIX_INSIGHTS}:{gateway_id}:{port_id}"
@@ -222,7 +223,7 @@ class RedisCache:
             logger.error(f"Error retrieving insights for {gateway_id}/{port_id}: {e}")
             return None
     
-    def set_all_insights(self, all_insights: Dict[str, Dict[str, Dict]], ttl: int = None) -> bool:
+    def set_all_insights(self, all_insights: dict[str, dict[str, dict[str, Any]]], ttl: Optional[int] = None) -> bool:
         """
         Store all insights in a single operation
         
@@ -244,7 +245,7 @@ class RedisCache:
             logger.error(f"Error storing all insights: {e}")
             return False
     
-    def get_all_insights(self) -> Dict[str, Dict[str, Dict]]:
+    def get_all_insights(self) -> dict[str, dict[str, dict[str, Any]]]:
         """Retrieve all traffic insights"""
         try:
             pattern = f"{self.PREFIX_INSIGHTS}:*"
@@ -298,7 +299,7 @@ class RedisCache:
             logger.error(f"Error retrieving last update timestamp: {e}")
             return None
     
-    def set_worker_status(self, status: str, details: Dict = None) -> bool:
+    def set_worker_status(self, status: str, details: Optional[dict[str, Any]] = None) -> bool:
         """Store worker status"""
         try:
             status_data = {
@@ -311,7 +312,7 @@ class RedisCache:
             logger.error(f"Error storing worker status: {e}")
             return False
     
-    def get_worker_status(self) -> Optional[Dict]:
+    def get_worker_status(self) -> Optional[dict[str, Any]]:
         """Retrieve worker status"""
         try:
             data = self.client.get(f"{self.PREFIX_METADATA}:worker_status")
