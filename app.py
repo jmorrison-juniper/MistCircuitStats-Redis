@@ -229,6 +229,31 @@ def api_token_status():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint for container orchestration"""
+    try:
+        c = get_cache()
+        redis_ok = c.client.ping()
+        cache_valid = c.is_cache_valid()
+        
+        status = 'healthy' if redis_ok else 'unhealthy'
+        code = 200 if redis_ok else 503
+        
+        return jsonify({
+            'status': status,
+            'redis': 'connected' if redis_ok else 'disconnected',
+            'cache_valid': cache_valid,
+            'mode': 'redis-cache'
+        }), code
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e)
+        }), 503
+
+
 # ==================== Main ====================
 
 if __name__ == '__main__':

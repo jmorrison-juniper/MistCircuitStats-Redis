@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mist Circuit Stats</title>
+    <title>Mist Circuit Stats (Redis)</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
@@ -427,7 +427,7 @@
     <nav class="navbar navbar-dark navbar-expand-lg">
         <div class="container-fluid">
             <span class="navbar-brand mb-0 h1">
-                <i class="bi bi-router"></i> Mist Circuit Stats
+                <i class="bi bi-router"></i> Mist Circuit Stats <small class="text-muted">(Redis)</small>
             </span>
             <div class="d-flex align-items-center">
                 <!-- Token Status -->
@@ -842,26 +842,30 @@
                 const response = await fetch('/api/token-status');
                 const data = await response.json();
                 if (data.success) {
-                    const usage = data.data;
-                    document.getElementById('currentToken').textContent = usage.current_token || 1;
-                    document.getElementById('tokenCount').textContent = usage.token_count;
-                    const usagePercent = Math.round((usage.requests / usage.request_limit) * 100);
-                    const usageClass = usagePercent > 80 ? 'text-danger' : usagePercent > 50 ? 'text-warning' : 'text-success';
-                    document.getElementById('apiUsage').innerHTML = 
-                        `<span class="${usageClass}">${usage.requests}/${usage.request_limit}</span>`;
+                    const status = data.data;
+                    // Show cache status instead of token info
+                    const workerStatus = status.worker_status || {};
+                    const lastUpdate = status.last_update ? new Date(status.last_update * 1000) : null;
                     
-                    // Update tooltip with more details
-                    const resetTime = Math.ceil(usage.seconds_until_reset);
-                    const resetMin = Math.floor(resetTime / 60);
-                    const resetSec = resetTime % 60;
+                    // Update cache status display
+                    document.getElementById('currentToken').textContent = status.cache_valid ? '✓' : '✗';
+                    document.getElementById('tokenCount').textContent = 'Cache';
+                    
+                    const statusClass = status.cache_valid ? 'text-success' : 'text-danger';
+                    const statusText = workerStatus.status || 'unknown';
+                    document.getElementById('apiUsage').innerHTML = 
+                        `<span class="${statusClass}">${statusText}</span>`;
+                    
+                    // Update tooltip with cache details
+                    const lastUpdateStr = lastUpdate ? lastUpdate.toLocaleTimeString() : 'Never';
                     document.getElementById('tokenStatus').title = 
-                        `Current Token: ${usage.current_token || 1} of ${usage.token_count}\n` +
-                        `API Usage: ${usage.requests}/${usage.request_limit} (${usagePercent}%)\n` +
-                        `Resets in: ${resetMin}m ${resetSec}s\n` +
-                        `SDK handles 429 rate limits with automatic token rotation`;
+                        `Cache Status: ${status.cache_valid ? 'Valid' : 'Empty'}\n` +
+                        `Worker: ${statusText}\n` +
+                        `Last Update: ${lastUpdateStr}\n` +
+                        `Data served from Redis cache`;
                 }
             } catch (error) {
-                console.error('Error fetching token status:', error);
+                console.error('Error fetching cache status:', error);
             }
         }
         
@@ -955,62 +959,46 @@
         }
         
         async function loadAllVpnPeers() {
-            const totalGateways = allGateways.length;
-            let processed = 0;
-            
-            // Process VPN peers in batches
-            for (let i = 0; i < allGateways.length; i += VPN_BATCH_SIZE) {
-                const batch = allGateways.slice(i, i + VPN_BATCH_SIZE);
+            // Redis version: Fetch all VPN peers from cache in one call
+            try {
+                const response = await fetch('/api/vpn-peers/all');
+                const data = await response.json();
                 
-                await Promise.all(batch.map(gateway => loadVpnPeerStats(gateway)));
-                
-                processed += batch.length;
-                updatePhaseProgress(2, processed, totalGateways);
-                console.log(`VPN loading progress: ${processed}/${totalGateways}`);
+                if (data.success) {
+                    vpnPeerCache = data.data;
+                    console.log(`Loaded VPN peers for ${Object.keys(vpnPeerCache).length} gateways from cache`);
+                    
+                    // Update all gateway VPN displays
+                    allGateways.forEach(gateway => {
+                        const cacheKey = `${gateway.id}-${gateway.mac}`;
+                        const peersByPort = vpnPeerCache[cacheKey] || {};
+                        updateVpnBadgesForGateway(gateway, peersByPort);
+                    });
+                }
+            } catch (error) {
+                console.error('Error fetching VPN peers from cache:', error);
             }
         }
         
         async function loadAllTrafficInsights() {
-            // Build request for bulk insights
-            const gatewaysForInsights = allGateways.map(gw => ({
-                site_id: gw.site_id,
-                gateway_id: gw.id,
-                ports: gw.ports.map(p => p.name)
-            }));
-            
-            const totalPorts = gatewaysForInsights.reduce((sum, gw) => sum + gw.ports.length, 0);
-            updatePhaseProgress(3, 0, totalPorts);
-            
-            // Process in smaller batches to avoid timeouts and show progress
-            const INSIGHTS_BATCH_SIZE = 5;  // Gateways per batch
-            let processedPorts = 0;
-            
-            for (let i = 0; i < gatewaysForInsights.length; i += INSIGHTS_BATCH_SIZE) {
-                const batch = gatewaysForInsights.slice(i, i + INSIGHTS_BATCH_SIZE);
+            // Redis version: Fetch all insights from cache in one call
+            try {
+                const response = await fetch('/api/insights/all');
+                const data = await response.json();
                 
-                try {
-                    const response = await fetch('/api/insights/bulk?duration=7d&gateways=' + encodeURIComponent(JSON.stringify(batch)));
-                    const result = await response.json();
+                if (data.success) {
+                    insightsCache = data.data;
+                    console.log(`Loaded insights for ${Object.keys(insightsCache).length} gateways from cache`);
                     
-                    if (result.success) {
-                        // Update cache and UI for this batch
-                        for (const [gatewayId, portData] of Object.entries(result.data)) {
-                            insightsCache[gatewayId] = portData;
-                            
-                            // Update table cells with traffic data
-                            for (const [portName, insights] of Object.entries(portData)) {
-                                if (insights.success) {
-                                    updateTrafficCell(gatewayId, portName, insights.rx_bytes, insights.tx_bytes);
-                                }
-                                processedPorts++;
-                            }
+                    // Update all traffic cells
+                    for (const [gatewayId, portData] of Object.entries(insightsCache)) {
+                        for (const [portName, insights] of Object.entries(portData)) {
+                            updateTrafficCell(gatewayId, portName, insights.rx_bytes || 0, insights.tx_bytes || 0);
                         }
                     }
-                } catch (error) {
-                    console.error('Error fetching insights batch:', error);
                 }
-                
-                updatePhaseProgress(3, processedPorts, totalPorts);
+            } catch (error) {
+                console.error('Error fetching insights from cache:', error);
             }
         }
         

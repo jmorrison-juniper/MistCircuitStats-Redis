@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  # Redis with AOF persistence
+  # Redis with RDB snapshots + AOF for durability
   redis:
     image: redis:7-alpine
     container_name: mist-redis
-    command: redis-server --appendonly yes --save 300 1
+    command: redis-server --appendonly yes --save 60 1 --save 300 10
     volumes:
       - redis_data:/data
     ports:
@@ -44,6 +44,12 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     depends_on:
       redis:
         condition: service_healthy
