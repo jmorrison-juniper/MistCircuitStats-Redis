@@ -1,0 +1,1938 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mist Circuit Stats</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+    <style>
+        :root {
+            --tmobile-magenta: #E20074;
+            --tmobile-magenta-hover: #C00062;
+        }
+        
+        body {
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+        }
+        
+        .navbar {
+            background-color: #2d2d2d !important;
+            border-bottom: 3px solid var(--tmobile-magenta);
+        }
+        
+        .btn-primary {
+            background-color: var(--tmobile-magenta);
+            border-color: var(--tmobile-magenta);
+        }
+        
+        .btn-primary:hover {
+            background-color: var(--tmobile-magenta-hover);
+            border-color: var(--tmobile-magenta-hover);
+        }
+        
+        .card {
+            background-color: #2d2d2d;
+            border: 1px solid #404040;
+            margin-bottom: 0.5rem;
+        }
+        
+        .card-header {
+            background-color: #363636;
+            border-bottom: 2px solid var(--tmobile-magenta);
+            font-weight: 600;
+        }
+        
+        .table {
+            color: #e0e0e0;
+        }
+        
+        .table-hover tbody tr:hover {
+            background-color: #363636;
+        }
+        
+        .badge {
+            font-size: 0.75rem;
+            padding: 0.25em 0.5em;
+        }
+        
+        .badge.status-connected {
+            background-color: #28a745;
+        }
+        
+        .badge.status-disconnected {
+            background-color: #dc3545;
+        }
+        
+        .port-up {
+            color: #28a745;
+        }
+        
+        .port-down {
+            color: #dc3545;
+        }
+        
+        .stats-card {
+            text-align: center;
+            padding: 0.75rem 0.5rem;
+        }
+        
+        .stats-value {
+            font-size: 1.75rem;
+            font-weight: bold;
+            color: var(--tmobile-magenta);
+        }
+        
+        .stats-label {
+            font-size: 0.8rem;
+            color: #a0a0a0;
+        }
+        
+        /* Persistent phase progress bar */
+        .phase-progress-bar {
+            background-color: #252525;
+            border-bottom: 1px solid #404040;
+            padding: 0.5rem 0;
+            position: sticky;
+            top: 56px;
+            z-index: 1020;
+        }
+        
+        .phase-indicator {
+            font-size: 0.8rem;
+            color: #888;
+        }
+        
+        .phase-indicator.active {
+            color: var(--tmobile-magenta);
+            font-weight: 600;
+        }
+        
+        .phase-indicator.completed {
+            color: #28a745;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 3rem;
+        }
+        
+        .spinner-border {
+            color: var(--tmobile-magenta);
+        }
+        
+        /* Phase loading cards */
+        .phase-card {
+            background-color: #363636;
+            border: 2px solid #404040;
+            transition: all 0.3s ease;
+        }
+        
+        .phase-card.active {
+            border-color: var(--tmobile-magenta);
+            box-shadow: 0 0 10px rgba(226, 0, 116, 0.3);
+        }
+        
+        .phase-card.completed {
+            border-color: #28a745;
+            background-color: rgba(40, 167, 69, 0.1);
+        }
+        
+        .phase-icon {
+            font-size: 1.5rem;
+            color: #6c757d;
+            display: block;
+            margin-bottom: 0.25rem;
+        }
+        
+        .phase-card.active .phase-icon {
+            color: var(--tmobile-magenta);
+            animation: pulse 1.5s infinite;
+        }
+        
+        .phase-card.completed .phase-icon {
+            color: #28a745;
+        }
+        
+        .phase-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        
+        .phase-status {
+            font-size: 0.65rem;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        /* Table styles */
+        .gateway-table {
+            background: #2a2a2a;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .gateway-table table {
+            margin-bottom: 0;
+        }
+        
+        .gateway-row {
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .gateway-row:hover {
+            background-color: #333 !important;
+        }
+        
+        .gateway-row.expanded {
+            background-color: #2d2d2d !important;
+        }
+        
+        .port-details-row {
+            background-color: #1f1f1f !important;
+            display: none;
+        }
+        
+        .port-details-row.show {
+            display: table-row;
+        }
+        
+        .port-details-container {
+            padding: 0.5rem;
+        }
+        
+        .port-details-table {
+            background: #2a2a2a;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+        
+        .port-details-table th {
+            font-size: 0.75rem;
+            background: #333;
+            padding: 0.35rem 0.4rem;
+            white-space: nowrap;
+        }
+        
+        .port-details-table td {
+            font-size: 0.8rem;
+            padding: 0.3rem 0.4rem;
+            white-space: nowrap;
+        }
+        
+        .port-details-table .badge {
+            font-size: 0.7rem;
+            padding: 0.2em 0.4em;
+        }
+        
+        /* Traffic data clickable cells */
+        .traffic-cell {
+            cursor: pointer;
+            text-decoration: underline;
+            text-decoration-style: dotted;
+            color: #6ea8fe;
+        }
+        
+        .traffic-cell:hover {
+            color: #8bb9fe;
+            background-color: #2a2a2a;
+        }
+        
+        /* Chart modal - dynamically scales with window */
+        .chart-modal {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 90vw;
+            max-width: 1400px;
+            height: auto;
+            max-height: 85vh;
+            background: #2d2d2d;
+            border: 2px solid var(--tmobile-magenta);
+            border-radius: 12px;
+            padding: 1.5rem;
+            z-index: 1050;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+            overflow-y: auto;
+        }
+        
+        .chart-modal-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.75);
+            z-index: 1049;
+        }
+        
+        .chart-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 2px solid #404040;
+        }
+        
+        .chart-modal-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--tmobile-magenta);
+        }
+        
+        .chart-modal-close {
+            background: transparent;
+            border: none;
+            font-size: 1.5rem;
+            color: #e0e0e0;
+            cursor: pointer;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .chart-modal-close:hover {
+            color: var(--tmobile-magenta);
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 400px;
+            margin-top: 1rem;
+        }
+        
+        .chart-container-small {
+            position: relative;
+            height: calc(50vh - 100px);
+            min-height: 250px;
+            max-height: 450px;
+        }
+        
+        .chart-title {
+            color: var(--tmobile-magenta);
+            font-weight: 500;
+            font-size: 1rem;
+        }
+        
+        .expand-icon {
+            transition: transform 0.3s;
+        }
+        
+        .expand-icon.expanded {
+            transform: rotate(90deg);
+        }
+        
+        /* iPad landscape optimization */
+        @media (min-width: 1024px) and (orientation: landscape) {
+            .container-fluid {
+                max-width: 100%;
+                padding-left: 1rem;
+                padding-right: 1rem;
+            }
+        }
+        
+        /* Chart modal responsive sizing */
+        @media (max-width: 768px) {
+            .chart-modal {
+                width: 95vw;
+                padding: 1rem;
+                max-height: 90vh;
+            }
+            
+            .chart-modal-header {
+                flex-wrap: wrap;
+                gap: 0.5rem;
+            }
+            
+            .chart-modal-title {
+                font-size: 1rem;
+                width: 100%;
+            }
+            
+            .chart-container-small {
+                height: calc(40vh - 50px);
+                min-height: 200px;
+            }
+            
+            .chart-modal .btn-group {
+                flex-wrap: wrap;
+            }
+            
+            .chart-modal .btn-group .btn {
+                font-size: 0.75rem;
+                padding: 0.25rem 0.5rem;
+            }
+        }
+        
+        @media (min-width: 1400px) {
+            .chart-container-small {
+                height: calc(55vh - 100px);
+                max-height: 500px;
+            }
+        }
+        
+        /* Compact table for all screens */
+        .table-compact th,
+        .table-compact td {
+            padding: 0.4rem 0.5rem;
+        }
+        
+        /* Main gateway table compact styling */
+        .gateway-table .table th {
+            font-size: 0.85rem;
+            padding: 0.5rem;
+        }
+        
+        .gateway-table .table td {
+            font-size: 0.85rem;
+            padding: 0.4rem 0.5rem;
+            vertical-align: middle;
+        }
+        
+        .toast-container {
+            position: fixed;
+            top: 70px;
+            right: 20px;
+            z-index: 1050;
+        }
+        
+        .search-box {
+            max-width: 400px;
+            margin-bottom: 1rem;
+        }
+        
+        .peer-paths-badge {
+            transition: all 0.2s;
+        }
+        
+        .peer-paths-badge:hover {
+            transform: scale(1.1);
+            box-shadow: 0 0 10px rgba(226, 0, 116, 0.5);
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-dark navbar-expand-lg">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1">
+                <i class="bi bi-router"></i> Mist Circuit Stats
+            </span>
+            <div class="d-flex align-items-center">
+                <!-- Token Status -->
+                <div class="me-3 small" id="tokenStatus" title="API Token Status">
+                    <span class="text-muted"><i class="bi bi-key"></i> Token: <span id="currentToken">-</span>/<span id="tokenCount">-</span></span>
+                    <span class="text-muted ms-2"><i class="bi bi-graph-up"></i> <span id="apiUsage">-</span></span>
+                </div>
+                <span class="badge bg-secondary me-2" id="orgBadge">Loading...</span>
+                <button class="btn btn-sm btn-outline-light me-2" onclick="downloadCSV()">
+                    <i class="bi bi-download"></i> Export CSV
+                </button>
+                <button class="btn btn-sm btn-outline-light" onclick="refreshData()">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Persistent Phase Progress Bar (visible during phases 2 & 3) -->
+    <div id="phaseProgressBar" class="phase-progress-bar" style="display: none;">
+        <div class="container-fluid">
+            <div class="d-flex align-items-center justify-content-between">
+                <div class="d-flex align-items-center">
+                    <span class="phase-indicator me-3" id="phase1Indicator">
+                        <i class="bi bi-router"></i> Gateways
+                        <span class="badge bg-success ms-1" id="phase1Badge">✓</span>
+                    </span>
+                    <span class="phase-indicator me-3" id="phase2Indicator">
+                        <i class="bi bi-diagram-3"></i> VPN Peers
+                        <span class="badge bg-secondary ms-1" id="phase2Badge">-</span>
+                    </span>
+                    <span class="phase-indicator" id="phase3Indicator">
+                        <i class="bi bi-graph-up"></i> Traffic
+                        <span class="badge bg-secondary ms-1" id="phase3Badge">-</span>
+                    </span>
+                </div>
+                <div class="progress flex-grow-1 mx-3" style="height: 6px; max-width: 300px;">
+                    <div class="progress-bar" id="persistentProgress" role="progressbar" style="width: 33%; background-color: var(--tmobile-magenta);"></div>
+                </div>
+                <span class="small text-muted" id="phaseStatusText">Loading VPN peers...</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="container-fluid mt-2">
+        <!-- Summary Stats -->
+        <div class="row mb-2">
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="stats-value" id="totalGateways">-</div>
+                    <div class="stats-label">Total Gateways</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="stats-value" id="connectedGateways">-</div>
+                    <div class="stats-label">Connected</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="stats-value" id="totalPorts">-</div>
+                    <div class="stats-label">Total WAN Ports</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="stats-value" id="activePorts">-</div>
+                    <div class="stats-label">Active Ports</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Info Alert -->
+        <div class="alert alert-info mb-2 py-2" role="alert" style="font-size: 0.85rem;">
+            <i class="bi bi-info-circle"></i> <strong>Note:</strong> RX/TX data shows 7-day traffic totals. Click on traffic values to view detailed charts with adjustable timeframes.
+        </div>
+
+        <!-- Search and Filters -->
+        <div class="row mb-2">
+            <div class="col-md-6">
+                <input type="text" class="form-control form-control-sm search-box" id="searchInput" placeholder="Search gateways by name or site...">
+            </div>
+            <div class="col-md-6 text-end">
+                <select class="form-select form-select-sm d-inline-block w-auto" id="siteFilter">
+                    <option value="">All Sites</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Loading State with Phase Progress -->
+        <div id="loadingState" class="loading">
+            <div class="spinner-border spinner-border-lg mb-3" role="status" style="width: 3rem; height: 3rem;">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <h5 class="mb-2" id="loadingTitle">Loading Gateway Statistics</h5>
+            <p class="text-muted mb-3" id="loadingMessage">Connecting to Mist API...</p>
+            
+            <!-- Phase Progress Indicator -->
+            <div class="container" style="max-width: 500px;">
+                <div class="row g-2 mb-3">
+                    <!-- Phase 1: Gateways -->
+                    <div class="col-4">
+                        <div class="card phase-card" id="phase1Card">
+                            <div class="card-body text-center py-2">
+                                <i class="bi bi-router phase-icon" id="phase1Icon"></i>
+                                <div class="phase-label">Gateways</div>
+                                <div class="phase-status text-muted small" id="phase1Status">Pending</div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Phase 2: VPN Peers -->
+                    <div class="col-4">
+                        <div class="card phase-card" id="phase2Card">
+                            <div class="card-body text-center py-2">
+                                <i class="bi bi-diagram-3 phase-icon" id="phase2Icon"></i>
+                                <div class="phase-label">VPN Peers</div>
+                                <div class="phase-status text-muted small" id="phase2Status">Pending</div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Phase 3: Traffic Insights -->
+                    <div class="col-4">
+                        <div class="card phase-card" id="phase3Card">
+                            <div class="card-body text-center py-2">
+                                <i class="bi bi-graph-up phase-icon" id="phase3Icon"></i>
+                                <div class="phase-label">Traffic</div>
+                                <div class="phase-status text-muted small" id="phase3Status">Pending</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Overall Progress Bar -->
+                <div class="progress" style="height: 8px;">
+                    <div class="progress-bar" id="overallProgress" role="progressbar" style="width: 0%; background-color: var(--tmobile-magenta);" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                </div>
+            </div>
+            
+            <!-- Elapsed time -->
+            <div class="d-flex justify-content-center gap-4 text-muted small mt-3">
+                <span><i class="bi bi-clock"></i> Elapsed: <span id="loadingElapsed">0:00</span></span>
+            </div>
+            
+            <p class="text-muted small mt-3 mb-0">
+                <i class="bi bi-info-circle"></i> Large organizations may take several minutes to load
+            </p>
+        </div>
+
+        <!-- Gateway Table -->
+        <div id="gatewayContainer" class="gateway-table" style="display: none;">
+            <div class="table-responsive">
+                <table class="table table-dark table-hover mb-0">
+                    <thead>
+                        <tr>
+                            <th style="width: 30px;"></th>
+                            <th>Site Name</th>
+                            <th>Router Hostname</th>
+                            <th>Model</th>
+                            <th>Status</th>
+                            <th>External IP</th>
+                            <th>Ports</th>
+                            <th>Uptime</th>
+                        </tr>
+                    </thead>
+                    <tbody id="gatewayTableBody">
+                        <!-- Rows will be inserted here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container">
+        <div id="toastNotification" class="toast" role="alert">
+            <div class="toast-header">
+                <i class="bi bi-info-circle me-2"></i>
+                <strong class="me-auto">Notification</strong>
+                <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
+            </div>
+            <div class="toast-body" id="toastBody">
+                Message here
+            </div>
+        </div>
+    </div>
+
+    <!-- Gateway Detail Modal -->
+    <div class="modal fade" id="gatewayModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalTitle">Gateway Details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="modalBody">
+                    <!-- Details will be loaded here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Traffic Chart Modal -->
+    <div id="chartModalBackdrop" class="chart-modal-backdrop" style="display: none;" onclick="closeChartModal()"></div>
+    <div id="chartModal" class="chart-modal" style="display: none;">
+        <div class="chart-modal-header">
+            <div class="chart-modal-title" id="chartModalTitle">Port Traffic</div>
+            <div class="d-flex align-items-center">
+                <div class="btn-group me-3" role="group" aria-label="Chart timeframe selector">
+                    <button type="button" class="btn btn-sm btn-outline-light" onclick="filterChartData('1h')" id="chart-btn-1h">1 Hour</button>
+                    <button type="button" class="btn btn-sm btn-outline-light" onclick="filterChartData('6h')" id="chart-btn-6h">6 Hours</button>
+                    <button type="button" class="btn btn-sm btn-outline-light" onclick="filterChartData('1d')" id="chart-btn-1d">24 Hours</button>
+                    <button type="button" class="btn btn-sm btn-outline-light active" onclick="filterChartData('7d')" id="chart-btn-7d">7 Days</button>
+                </div>
+                <button class="chart-modal-close" onclick="closeChartModal()">&times;</button>
+            </div>
+        </div>
+        <div class="row g-3 px-3">
+            <div class="col-md-6">
+                <div class="chart-title text-center mb-2">
+                    <i class="bi bi-speedometer2"></i> Traffic Rate
+                </div>
+                <div class="chart-container-small">
+                    <canvas id="trafficChartRate"></canvas>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="chart-title text-center mb-2">
+                    <i class="bi bi-database"></i> Data Transferred
+                </div>
+                <div class="chart-container-small">
+                    <canvas id="trafficChartData"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Peer Paths Modal -->
+    <div class="modal fade" id="peerPathsModal" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-fullscreen-lg-down">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="peerPathsModalTitle">VPN Peer Paths</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="peerPathsModalBody" style="max-height: 70vh; overflow-y: auto;">
+                    <!-- Peer paths details will be loaded here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let allGateways = [];
+        let allSites = [];
+        let currentDuration = '7d';  // Always fetch 7 days of data
+        let vpnPeerCache = {};
+        let cachedTrafficData = null;  // Cache for 7-day traffic data
+        let currentChartContext = null;  // Store current chart context for filtering
+        let currentChartViewDuration = '7d';  // Current view in the chart modal
+        
+        // Loading progress tracking
+        let loadingStartTime = null;
+        let loadingTimerInterval = null;
+        
+        // Token status refresh interval (5 minutes)
+        let tokenStatusInterval = null;
+        const TOKEN_STATUS_REFRESH_MS = 5 * 60 * 1000;
+        
+        function startLoadingProgress() {
+            loadingStartTime = Date.now();
+            document.getElementById('loadingMessage').textContent = 'Connecting to Mist API...';
+            document.getElementById('loadingTitle').textContent = 'Loading Gateway Statistics';
+            
+            // Reset phase indicators
+            resetPhaseIndicators();
+            
+            // Update elapsed time every second
+            loadingTimerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - loadingStartTime) / 1000);
+                const minutes = Math.floor(elapsed / 60);
+                const seconds = elapsed % 60;
+                document.getElementById('loadingElapsed').textContent = 
+                    `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            }, 1000);
+        }
+        
+        function resetPhaseIndicators() {
+            // Reset all phases to pending
+            for (let i = 1; i <= 3; i++) {
+                document.getElementById(`phase${i}Card`).className = 'card phase-card';
+                document.getElementById(`phase${i}Status`).textContent = 'Pending';
+                document.getElementById(`phase${i}Status`).className = 'phase-status text-muted small';
+            }
+            document.getElementById('overallProgress').style.width = '0%';
+            
+            // Hide persistent progress bar initially
+            document.getElementById('phaseProgressBar').style.display = 'none';
+        }
+        
+        function updatePhase(phase, status, message) {
+            const card = document.getElementById(`phase${phase}Card`);
+            const statusEl = document.getElementById(`phase${phase}Status`);
+            
+            // Remove previous states
+            card.classList.remove('active', 'completed');
+            
+            if (status === 'active') {
+                card.classList.add('active');
+                statusEl.textContent = message || 'Loading...';
+                statusEl.className = 'phase-status small';
+                statusEl.style.color = 'var(--tmobile-magenta)';
+            } else if (status === 'completed') {
+                card.classList.add('completed');
+                statusEl.textContent = message || 'Complete';
+                statusEl.className = 'phase-status text-success small';
+            } else if (status === 'error') {
+                statusEl.textContent = message || 'Error';
+                statusEl.className = 'phase-status text-danger small';
+            }
+            
+            // Update overall progress bar
+            const progress = (phase - 1) * 33 + (status === 'completed' ? 33 : (status === 'active' ? 16 : 0));
+            document.getElementById('overallProgress').style.width = `${Math.min(progress, 100)}%`;
+            
+            // Update persistent progress bar (visible during phases 2 & 3)
+            updatePersistentProgress(phase, status, message);
+        }
+        
+        function updatePersistentProgress(phase, status, message) {
+            const progressBar = document.getElementById('phaseProgressBar');
+            const persistentProgressEl = document.getElementById('persistentProgress');
+            const statusText = document.getElementById('phaseStatusText');
+            
+            // Show/hide based on current phase
+            if (phase >= 2 || (phase === 1 && status === 'completed')) {
+                progressBar.style.display = 'block';
+            }
+            
+            // Update phase indicators
+            for (let i = 1; i <= 3; i++) {
+                const indicator = document.getElementById(`phase${i}Indicator`);
+                const badge = document.getElementById(`phase${i}Badge`);
+                
+                indicator.classList.remove('active', 'completed');
+                
+                if (i < phase || (i === phase && status === 'completed')) {
+                    indicator.classList.add('completed');
+                    badge.className = 'badge bg-success ms-1';
+                    badge.textContent = '✓';
+                } else if (i === phase && status === 'active') {
+                    indicator.classList.add('active');
+                    badge.className = 'badge ms-1';
+                    badge.style.backgroundColor = 'var(--tmobile-magenta)';
+                    badge.textContent = message || '...';
+                } else {
+                    badge.className = 'badge bg-secondary ms-1';
+                    badge.textContent = '-';
+                }
+            }
+            
+            // Update progress bar
+            const progress = (phase - 1) * 33 + (status === 'completed' ? 33 : 16);
+            persistentProgressEl.style.width = `${Math.min(progress, 100)}%`;
+            
+            // Update status text
+            if (phase === 2 && status === 'active') {
+                statusText.textContent = `Loading VPN peers: ${message || '...'}`;
+            } else if (phase === 3 && status === 'active') {
+                statusText.textContent = `Loading traffic data: ${message || '...'}`;
+            } else if (phase === 3 && status === 'completed') {
+                statusText.textContent = 'All data loaded!';
+                // Hide after a delay
+                setTimeout(() => {
+                    progressBar.style.display = 'none';
+                }, 3000);
+            }
+        }
+        
+        function updatePhaseProgress(phase, current, total) {
+            const statusEl = document.getElementById(`phase${phase}Status`);
+            statusEl.textContent = `${current}/${total}`;
+            
+            // Also update persistent progress bar badge
+            const badge = document.getElementById(`phase${phase}Badge`);
+            if (badge) {
+                badge.textContent = `${current}/${total}`;
+            }
+            
+            // Update status text
+            const statusText = document.getElementById('phaseStatusText');
+            if (phase === 2) {
+                statusText.textContent = `Loading VPN peers: ${current}/${total}`;
+            } else if (phase === 3) {
+                statusText.textContent = `Loading traffic data: ${current}/${total}`;
+            }
+        }
+        
+        function stopLoadingProgress(gatewayCount) {
+            if (loadingTimerInterval) {
+                clearInterval(loadingTimerInterval);
+                loadingTimerInterval = null;
+            }
+            document.getElementById('loadingMessage').textContent = `Loaded ${gatewayCount} gateways`;
+            document.getElementById('overallProgress').style.width = '100%';
+        }
+        
+        async function fetchTokenStatus() {
+            try {
+                const response = await fetch('/api/token-status');
+                const data = await response.json();
+                if (data.success) {
+                    const usage = data.data;
+                    document.getElementById('currentToken').textContent = usage.current_token || 1;
+                    document.getElementById('tokenCount').textContent = usage.token_count;
+                    const usagePercent = Math.round((usage.requests / usage.request_limit) * 100);
+                    const usageClass = usagePercent > 80 ? 'text-danger' : usagePercent > 50 ? 'text-warning' : 'text-success';
+                    document.getElementById('apiUsage').innerHTML = 
+                        `<span class="${usageClass}">${usage.requests}/${usage.request_limit}</span>`;
+                    
+                    // Update tooltip with more details
+                    const resetTime = Math.ceil(usage.seconds_until_reset);
+                    const resetMin = Math.floor(resetTime / 60);
+                    const resetSec = resetTime % 60;
+                    document.getElementById('tokenStatus').title = 
+                        `Current Token: ${usage.current_token || 1} of ${usage.token_count}\n` +
+                        `API Usage: ${usage.requests}/${usage.request_limit} (${usagePercent}%)\n` +
+                        `Resets in: ${resetMin}m ${resetSec}s\n` +
+                        `SDK handles 429 rate limits with automatic token rotation`;
+                }
+            } catch (error) {
+                console.error('Error fetching token status:', error);
+            }
+        }
+        
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            startLoadingProgress();
+            loadData();
+            fetchTokenStatus();
+            
+            // Refresh token status every 5 minutes
+            tokenStatusInterval = setInterval(fetchTokenStatus, TOKEN_STATUS_REFRESH_MS);
+            
+            // Setup search
+            document.getElementById('searchInput').addEventListener('input', filterGateways);
+            document.getElementById('siteFilter').addEventListener('change', filterGateways);
+        });
+        
+        // Removed changeTimeframe function - now always fetching 7d data
+        // Chart view filtering is handled by filterChartData()
+        
+        // Insights data cache (populated in phase 3)
+        let insightsCache = {};
+        
+        async function loadData() {
+            try {
+                // ======== PHASE 1: Load Gateways ========
+                updatePhase(1, 'active', 'Fetching...');
+                document.getElementById('loadingMessage').textContent = 'Fetching gateway data...';
+                
+                // Load organization info
+                const orgResponse = await fetch('/api/organization');
+                const orgData = await orgResponse.json();
+                if (orgData.success) {
+                    document.getElementById('orgBadge').textContent = orgData.data.org_name;
+                }
+                
+                // Load sites for filter
+                const sitesResponse = await fetch('/api/sites');
+                const sitesData = await sitesResponse.json();
+                if (sitesData.success) {
+                    allSites = sitesData.data;
+                    populateSiteFilter();
+                }
+                
+                // Load gateways (always fetches 7-day data)
+                const gatewaysResponse = await fetch('/api/gateways');
+                const gatewaysData = await gatewaysResponse.json();
+                
+                if (!gatewaysData.success) {
+                    updatePhase(1, 'error', 'Failed');
+                    stopLoadingProgress(0);
+                    showToast('Error loading gateways: ' + gatewaysData.error, 'danger');
+                    return;
+                }
+                
+                allGateways = gatewaysData.data;
+                updatePhase(1, 'completed', `${allGateways.length} found`);
+                updateStats();
+                
+                // Render gateways immediately (VPN and traffic show as loading)
+                renderGateways(allGateways, false);  // false = don't start VPN loading yet
+                
+                // Show the table now
+                document.getElementById('loadingState').style.display = 'none';
+                document.getElementById('gatewayContainer').style.display = 'block';
+                
+                // ======== PHASE 2: Load VPN Peer Paths ========
+                updatePhase(2, 'active', '0/' + allGateways.length);
+                document.getElementById('loadingMessage').textContent = 'Fetching VPN peer paths...';
+                
+                await loadAllVpnPeers();
+                
+                updatePhase(2, 'completed', `${allGateways.length} done`);
+                
+                // ======== PHASE 3: Load Traffic Insights ========
+                updatePhase(3, 'active', 'Starting...');
+                document.getElementById('loadingMessage').textContent = 'Fetching traffic insights...';
+                
+                await loadAllTrafficInsights();
+                
+                updatePhase(3, 'completed', 'Complete');
+                stopLoadingProgress(allGateways.length);
+                
+                showToast(`Loaded ${allGateways.length} gateways with VPN and traffic data`, 'success');
+                
+            } catch (error) {
+                console.error('Error:', error);
+                stopLoadingProgress(0);
+                showToast('Error loading data: ' + error.message, 'danger');
+            }
+        }
+        
+        async function loadAllVpnPeers() {
+            const totalGateways = allGateways.length;
+            let processed = 0;
+            
+            // Process VPN peers in batches
+            for (let i = 0; i < allGateways.length; i += VPN_BATCH_SIZE) {
+                const batch = allGateways.slice(i, i + VPN_BATCH_SIZE);
+                
+                await Promise.all(batch.map(gateway => loadVpnPeerStats(gateway)));
+                
+                processed += batch.length;
+                updatePhaseProgress(2, processed, totalGateways);
+                console.log(`VPN loading progress: ${processed}/${totalGateways}`);
+            }
+        }
+        
+        async function loadAllTrafficInsights() {
+            // Build request for bulk insights
+            const gatewaysForInsights = allGateways.map(gw => ({
+                site_id: gw.site_id,
+                gateway_id: gw.id,
+                ports: gw.ports.map(p => p.name)
+            }));
+            
+            const totalPorts = gatewaysForInsights.reduce((sum, gw) => sum + gw.ports.length, 0);
+            updatePhaseProgress(3, 0, totalPorts);
+            
+            // Process in smaller batches to avoid timeouts and show progress
+            const INSIGHTS_BATCH_SIZE = 5;  // Gateways per batch
+            let processedPorts = 0;
+            
+            for (let i = 0; i < gatewaysForInsights.length; i += INSIGHTS_BATCH_SIZE) {
+                const batch = gatewaysForInsights.slice(i, i + INSIGHTS_BATCH_SIZE);
+                
+                try {
+                    const response = await fetch('/api/insights/bulk?duration=7d&gateways=' + encodeURIComponent(JSON.stringify(batch)));
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        // Update cache and UI for this batch
+                        for (const [gatewayId, portData] of Object.entries(result.data)) {
+                            insightsCache[gatewayId] = portData;
+                            
+                            // Update table cells with traffic data
+                            for (const [portName, insights] of Object.entries(portData)) {
+                                if (insights.success) {
+                                    updateTrafficCell(gatewayId, portName, insights.rx_bytes, insights.tx_bytes);
+                                }
+                                processedPorts++;
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error fetching insights batch:', error);
+                }
+                
+                updatePhaseProgress(3, processedPorts, totalPorts);
+            }
+        }
+        
+        function updateTrafficCell(gatewayId, portName, rxBytes, txBytes) {
+            // Find the gateway in our data and update it
+            const gateway = allGateways.find(gw => gw.id === gatewayId);
+            if (!gateway) {
+                console.warn(`updateTrafficCell: Gateway not found: ${gatewayId}`);
+                return;
+            }
+            
+            // Update the port data
+            const port = gateway.ports.find(p => p.name === portName);
+            if (port) {
+                port.rx_bytes = rxBytes;
+                port.tx_bytes = txBytes;
+            }
+            
+            // Update the table cells
+            const safePortName = portName.replace(/[^a-zA-Z0-9]/g, '_');
+            const rxCellId = `rx-${gatewayId}-${safePortName}`;
+            const txCellId = `tx-${gatewayId}-${safePortName}`;
+            const rxCell = document.getElementById(rxCellId);
+            const txCell = document.getElementById(txCellId);
+            
+            if (rxCell) {
+                rxCell.innerHTML = formatBytes(rxBytes);
+                rxCell.classList.remove('text-muted');
+            } else {
+                console.warn(`updateTrafficCell: RX cell not found: ${rxCellId}`);
+            }
+            if (txCell) {
+                txCell.innerHTML = formatBytes(txBytes);
+                txCell.classList.remove('text-muted');
+            } else {
+                console.warn(`updateTrafficCell: TX cell not found: ${txCellId}`);
+            }
+        }
+        
+        function populateSiteFilter() {
+            const select = document.getElementById('siteFilter');
+            allSites.forEach(site => {
+                const option = document.createElement('option');
+                option.value = site.id;
+                option.textContent = site.name;
+                select.appendChild(option);
+            });
+        }
+        
+        function updateStats() {
+            const connected = allGateways.filter(gw => gw.status === 'connected').length;
+            const totalPorts = allGateways.reduce((sum, gw) => sum + gw.num_ports, 0);
+            const activePorts = allGateways.reduce((sum, gw) => 
+                sum + gw.ports.filter(p => p.up).length, 0);
+            
+            document.getElementById('totalGateways').textContent = allGateways.length;
+            document.getElementById('connectedGateways').textContent = connected;
+            document.getElementById('totalPorts').textContent = totalPorts;
+            document.getElementById('activePorts').textContent = activePorts;
+        }
+        
+        function filterGateways() {
+            const searchTerm = document.getElementById('searchInput').value.toLowerCase();
+            const siteId = document.getElementById('siteFilter').value;
+            
+            const filtered = allGateways.filter(gw => {
+                const matchesSearch = gw.name.toLowerCase().includes(searchTerm) || 
+                                     gw.site_name.toLowerCase().includes(searchTerm);
+                const matchesSite = !siteId || gw.site_id === siteId;
+                return matchesSearch && matchesSite;
+            });
+            
+            // Don't reload VPN data - use cached data by re-rendering with startVpnLoading=false
+            renderGateways(filtered, false);
+            
+            // Reapply cached VPN peer data to the filtered view
+            filtered.forEach(gateway => {
+                const cacheKey = `${gateway.id}-${gateway.mac}`;
+                if (vpnPeerCache[cacheKey]) {
+                    updatePeerPathsCells(gateway, vpnPeerCache[cacheKey]);
+                }
+            });
+        }
+        
+        function updatePeerPathsCells(gateway, peersByPort) {
+            // Update peer paths cells with cached data
+            gateway.ports.forEach(port => {
+                const safePortName = port.name.replace(/[^a-zA-Z0-9]/g, '_');
+                const cellId = `peer-paths-${gateway.id}-${safePortName}`;
+                const cell = document.getElementById(cellId);
+                
+                if (cell) {
+                    const peerCount = peersByPort[port.name] || 0;
+                    if (peerCount > 0) {
+                        cell.innerHTML = `<span class="badge bg-info clickable-peers" style="cursor: pointer;" onclick="event.stopPropagation(); showPeerPathsModal('${gateway.id}', '${gateway.mac}', '${port.name}', '${gateway.name}')">${peerCount} peers</span>`;
+                    } else {
+                        cell.innerHTML = `<span class="text-muted">-</span>`;
+                    }
+                }
+            });
+        }
+        
+        // Queue for batched VPN loading
+        let vpnLoadQueue = [];
+        let vpnLoadingInProgress = false;
+        const VPN_BATCH_SIZE = 10;  // Process 10 at a time to avoid browser connection limits
+        
+        function renderGateways(gateways, startVpnLoading = true) {
+            const tbody = document.getElementById('gatewayTableBody');
+            tbody.innerHTML = '';
+            vpnLoadQueue = [];  // Clear queue
+            
+            if (gateways.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No gateways found</td></tr>';
+                return;
+            }
+            
+            gateways.forEach((gateway, index) => {
+                // Main gateway row
+                const row = createGatewayRow(gateway, index);
+                tbody.appendChild(row);
+                
+                // Expandable port details row
+                const detailsRow = createPortDetailsRow(gateway, index);
+                tbody.appendChild(detailsRow);
+            });
+            
+            // Only start VPN loading if requested (for filtering, we want to preserve cached data)
+            if (startVpnLoading) {
+                processVpnQueue();
+            }
+        }
+        
+        async function processVpnQueue() {
+            if (vpnLoadingInProgress || vpnLoadQueue.length === 0) return;
+            
+            vpnLoadingInProgress = true;
+            const totalQueued = vpnLoadQueue.length;
+            let processed = 0;
+            
+            console.log(`Starting VPN peer loading for ${totalQueued} gateways (batch size: ${VPN_BATCH_SIZE})`);
+            
+            while (vpnLoadQueue.length > 0) {
+                // Take next batch
+                const batch = vpnLoadQueue.splice(0, VPN_BATCH_SIZE);
+                
+                // Process batch in parallel
+                await Promise.all(batch.map(gateway => loadVpnPeerStats(gateway)));
+                
+                processed += batch.length;
+                console.log(`VPN loading progress: ${processed}/${totalQueued}`);
+            }
+            
+            vpnLoadingInProgress = false;
+            console.log('VPN peer loading complete');
+        }
+        
+        function createGatewayRow(gateway, index) {
+            const row = document.createElement('tr');
+            row.className = 'gateway-row';
+            row.id = `gateway-row-${index}`;
+            row.onclick = () => togglePortDetails(index);
+            
+            const statusClass = gateway.status === 'connected' ? 'status-connected' : 'status-disconnected';
+            const uptimeHours = Math.floor(gateway.uptime / 3600);
+            const uptimeDays = Math.floor(uptimeHours / 24);
+            const uptimeDisplay = uptimeDays > 0 ? `${uptimeDays}d ${uptimeHours % 24}h` : `${uptimeHours}h`;
+            
+            row.innerHTML = `
+                <td><i class="bi bi-chevron-right expand-icon" id="icon-${index}"></i></td>
+                <td>${gateway.site_name || 'Unknown Site'}</td>
+                <td><strong>${gateway.name}</strong></td>
+                <td>${gateway.model}</td>
+                <td><span class="badge ${statusClass}">${gateway.status}</span></td>
+                <td>${gateway.ip || 'N/A'}</td>
+                <td>${gateway.num_ports}</td>
+                <td>${uptimeDisplay}</td>
+            `;
+            
+            return row;
+        }
+        
+        function createPortDetailsRow(gateway, index) {
+            const detailsRow = document.createElement('tr');
+            detailsRow.className = 'port-details-row';
+            detailsRow.id = `details-row-${index}`;
+            
+            const portsHtml = gateway.ports.length > 0 ? `
+                <div class="table-responsive">
+                    <table class="table table-sm table-dark port-details-table mb-0">
+                        <thead>
+                            <tr>
+                                <th>Port Name</th>
+                                <th>WAN Name</th>
+                                <th>Description</th>
+                                <th>Enablement</th>
+                                <th>Physical Status</th>
+                                <th>Gateway IP</th>
+                                <th>WAN IP</th>
+                                <th>VLAN</th>
+                                <th>CIDR</th>
+                                <th>Config Type</th>
+                                <th>Override</th>
+                                <th>Peer Paths</th>
+                                <th>RX Data</th>
+                                <th>TX Data</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${gateway.ports.map(port => {
+                                // Use vlan_id from backend, fallback to parsing from port name
+                                const vlan = port.vlan_id || (port.name.match(/\.(\d+)$/) ? port.name.match(/\.(\d+)$/)[1] : '-');
+                                
+                                return `
+                                <tr>
+                                    <td><strong>${port.name}</strong></td>
+                                    <td>${port.wan_name || '-'}</td>
+                                    <td>${port.description || '-'}</td>
+                                    <td>
+                                        <span class="badge ${port.enabled ? 'bg-success' : 'bg-danger'}">
+                                            ${port.enabled ? 'Enabled' : 'Disabled'}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <span class="badge ${port.up ? 'bg-success' : 'bg-danger'}">
+                                            ${port.up ? 'Up' : 'Down'}
+                                        </span>
+                                    </td>
+                                    <td>${port.gateway || '-'}</td>
+                                    <td>${port.ip || '-'}</td>
+                                    <td>${vlan}</td>
+                                    <td>${port.netmask ? '/' + port.netmask : '-'}</td>
+                                    <td><span class="badge ${port.type === 'static' ? 'bg-success' : 'bg-primary'}">${port.type.toUpperCase()}</span></td>
+                                    <td><span class="badge ${port.override === 'yes' ? 'bg-danger' : 'bg-success'}">${port.override.toUpperCase()}</span></td>
+                                    <td id="peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}">
+                                        <span class="text-muted"><i class="bi bi-hourglass-split"></i> Loading...</span>
+                                    </td>
+                                    <td class="traffic-cell" id="rx-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}" onclick="showTrafficChart('${gateway.site_id}', '${gateway.id}', '${port.name}', '${gateway.name}')" title="Click to view traffic chart">
+                                        ${port.rx_bytes ? formatBytes(port.rx_bytes) : '<span class="text-muted"><i class="bi bi-hourglass-split"></i></span>'}
+                                    </td>
+                                    <td class="traffic-cell" id="tx-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}" onclick="showTrafficChart('${gateway.site_id}', '${gateway.id}', '${port.name}', '${gateway.name}')" title="Click to view traffic chart">
+                                        ${port.tx_bytes ? formatBytes(port.tx_bytes) : '<span class="text-muted"><i class="bi bi-hourglass-split"></i></span>'}
+                                    </td>
+                                </tr>`;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            ` : '<p class="text-center text-muted my-3">No port configuration data available</p>';
+            
+            detailsRow.innerHTML = `<td colspan="8"><div class="port-details-container">${portsHtml}</div></td>`;
+            
+            // Note: VPN peer stats are now loaded in phase 2 of loadData(), not here
+            
+            return detailsRow;
+        }
+        
+        function togglePortDetails(index) {
+            const detailsRow = document.getElementById(`details-row-${index}`);
+            const gatewayRow = document.getElementById(`gateway-row-${index}`);
+            const icon = document.getElementById(`icon-${index}`);
+            
+            detailsRow.classList.toggle('show');
+            gatewayRow.classList.toggle('expanded');
+            icon.classList.toggle('expanded');
+        }
+        
+
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        function refreshData() {
+            // Clear caches
+            vpnPeerCache = {};
+            insightsCache = {};
+            
+            document.getElementById('loadingState').style.display = 'block';
+            document.getElementById('gatewayContainer').style.display = 'none';
+            startLoadingProgress();
+            loadData();
+        }
+        
+        function downloadCSV() {
+            if (!allGateways || allGateways.length === 0) {
+                showToast('No data available to export', 'danger');
+                return;
+            }
+            
+            // Build CSV content - matching table columns exactly
+            const headers = [
+                'Site Name', 'Router Hostname', 'Model', 'Status', 'External IP', 'Uptime',
+                'Port Name', 'WAN Name', 'Description', 'Enablement', 'Physical Status', 
+                'Gateway IP', 'WAN IP', 'VLAN', 'CIDR', 'Config Type', 'Override', 'Peer Paths',
+                'RX Data (Bytes)', 'TX Data (Bytes)'
+            ];
+            const rows = [headers];
+            
+            // Process each gateway
+            allGateways.forEach(gateway => {
+                const siteName = gateway.site_name || 'Unknown';
+                const gatewayName = gateway.name || gateway.id;
+                const model = gateway.model || '';
+                const status = gateway.status || 'unknown';
+                const ipAddress = gateway.ip || '';
+                // Calculate uptime display (same as table)
+                const uptimeHours = Math.floor((gateway.uptime || 0) / 3600);
+                const uptimeDays = Math.floor(uptimeHours / 24);
+                const uptime = uptimeDays > 0 ? `${uptimeDays}d ${uptimeHours % 24}h` : `${uptimeHours}h`;
+                
+                // Get peer paths from cache
+                const cacheKey = `${gateway.id}-${gateway.mac}`;
+                const peersByPort = vpnPeerCache[cacheKey] || {};
+                
+                if (gateway.ports && gateway.ports.length > 0) {
+                    gateway.ports.forEach(port => {
+                        // Use vlan_id from backend, fallback to parsing from port name
+                        const vlan = port.vlan_id || (port.name.match(/\.(\d+)$/) ? port.name.match(/\.(\d+)$/)[1] : '-');
+                        
+                        // Get peer paths - try exact match first, then look for VLAN-tagged ports
+                        let peers = peersByPort[port.name] || [];
+                        
+                        // If no exact match, look for peers that start with this port name (e.g., ge-0/0/0.20 starts with ge-0/0/0)
+                        if (peers.length === 0) {
+                            peers = [];
+                            for (const [portId, portPeers] of Object.entries(peersByPort)) {
+                                if (portId.startsWith(port.name + '.') || portId === port.name) {
+                                    peers.push(...portPeers);
+                                }
+                            }
+                        }
+                        
+                        const upCount = peers.filter(p => p.up).length;
+                        const totalCount = peers.length;
+                        // Use 'of' instead of '/' to prevent Excel from converting to date
+                        const peerPathsStr = totalCount > 0 ? `${upCount} of ${totalCount}` : '-';
+                        
+                        rows.push([
+                            siteName,
+                            gatewayName,
+                            model,
+                            status,
+                            ipAddress,
+                            uptime,
+                            port.name || '',
+                            port.wan_name || '',
+                            port.description || '',
+                            port.enabled ? 'Enabled' : 'Disabled',
+                            port.up ? 'Up' : 'Down',
+                            port.gateway || '',
+                            port.ip || '',
+                            vlan,
+                            port.netmask ? '/' + port.netmask : '',
+                            port.type ? port.type.toUpperCase() : '',
+                            port.override ? port.override.toUpperCase() : '',
+                            peerPathsStr,
+                            port.rx_bytes || 0,
+                            port.tx_bytes || 0
+                        ]);
+                    });
+                } else {
+                    // Gateway with no WAN ports
+                    rows.push([
+                        siteName,
+                        gatewayName,
+                        model,
+                        status,
+                        ipAddress,
+                        uptime,
+                        '', '', '', '', '', '', '', '', '', '', '', '', '-', 0, 0
+                    ]);
+                }
+            });
+            
+            // Convert to CSV string
+            const csvContent = rows.map(row => 
+                row.map(cell => {
+                    // Escape quotes and wrap in quotes if contains comma, quote, or newline
+                    const cellStr = String(cell);
+                    if (cellStr.includes(',') || cellStr.includes('"') || cellStr.includes('\n')) {
+                        return '"' + cellStr.replace(/"/g, '""') + '"';
+                    }
+                    return cellStr;
+                }).join(',')
+            ).join('\n');
+            
+            // Create download link
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            
+            // Generate filename with timestamp (always 7-day data)
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+            const filename = `mist-circuit-stats-7d-${timestamp}.csv`;
+            
+            link.setAttribute('href', url);
+            link.setAttribute('download', filename);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            showToast('CSV exported successfully', 'success');
+        }
+        
+        function showToast(message, type = 'info') {
+            const toastEl = document.getElementById('toastNotification');
+            const toastBody = document.getElementById('toastBody');
+            
+            toastBody.textContent = message;
+            toastEl.classList.remove('bg-success', 'bg-danger', 'bg-info');
+            toastEl.classList.add('bg-' + type);
+            
+            const toast = new bootstrap.Toast(toastEl);
+            toast.show();
+        }
+        
+        // Chart modal functions
+        let trafficChartRateInstance = null;
+        let trafficChartDataInstance = null;
+        
+        function closeChartModal() {
+            document.getElementById('chartModal').style.display = 'none';
+            document.getElementById('chartModalBackdrop').style.display = 'none';
+            if (trafficChartRateInstance) {
+                trafficChartRateInstance.destroy();
+                trafficChartRateInstance = null;
+            }
+            if (trafficChartDataInstance) {
+                trafficChartDataInstance.destroy();
+                trafficChartDataInstance = null;
+            }
+            // Clear cached data
+            cachedTrafficData = null;
+            currentChartContext = null;
+        }
+        
+        function updateChartFilterButtons() {
+            // Update active button state for chart filter
+            ['1h', '6h', '1d', '7d'].forEach(dur => {
+                const btn = document.getElementById(`chart-btn-${dur}`);
+                if (btn) {
+                    if (dur === currentChartViewDuration) {
+                        btn.classList.add('active');
+                    } else {
+                        btn.classList.remove('active');
+                    }
+                }
+            });
+        }
+        
+        function filterChartData(viewDuration) {
+            currentChartViewDuration = viewDuration;
+            updateChartFilterButtons();
+            
+            // Re-fetch data with optimal resolution for the selected duration
+            fetchAndDisplayTraffic(viewDuration);
+        }
+        
+        async function showTrafficChart(siteId, deviceId, portId, gatewayName) {
+            // Show modal immediately
+            document.getElementById('chartModal').style.display = 'block';
+            document.getElementById('chartModalBackdrop').style.display = 'block';
+            
+            // Reset to 7d view and update button states
+            currentChartViewDuration = '7d';
+            updateChartFilterButtons();
+            
+            document.getElementById('chartModalTitle').textContent = `${gatewayName} - ${portId} Traffic`;
+            
+            // Store context for filtering/re-fetching
+            currentChartContext = { siteId, deviceId, portId, gatewayName };
+            
+            // Fetch data for the current view
+            await fetchAndDisplayTraffic('7d');
+        }
+        
+        async function fetchAndDisplayTraffic(viewDuration) {
+            if (!currentChartContext) return;
+            
+            const { siteId, deviceId, portId } = currentChartContext;
+            
+            const end = Math.floor(Date.now() / 1000);
+            
+            // Use optimal resolution based on duration:
+            // Mist API stores data at ~10-min granularity, finer intervals have nulls
+            // - 1h: 5-min resolution (12 points) - best detail for short window
+            // - 6h: 5-min resolution (72 points) - good detail
+            // - 1d: 10-min resolution (144 points, ~88% valid)
+            // - 7d: 1-hour resolution (168 points, 100% valid)
+            const durationConfig = {
+                '1h':  { seconds: 60 * 60,          interval: 300 },   // 12 points at 5-min
+                '6h':  { seconds: 6 * 60 * 60,      interval: 300 },   // 72 points at 5-min
+                '1d':  { seconds: 24 * 60 * 60,     interval: 600 },   // 144 points at 10-min
+                '7d':  { seconds: 7 * 24 * 60 * 60, interval: 3600 }   // 168 points at 1-hour
+            };
+            
+            const config = durationConfig[viewDuration] || durationConfig['7d'];
+            const start = end - config.seconds;
+            
+            try {
+                const response = await fetch(
+                    `/api/gateway/${deviceId}/port/${encodeURIComponent(portId)}/traffic?` +
+                    `site_id=${siteId}&start=${start}&end=${end}&interval=${config.interval}`
+                );
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch traffic data');
+                }
+                
+                const result = await response.json();
+                
+                if (!result.success) {
+                    throw new Error(result.error || 'Failed to fetch traffic data');
+                }
+                
+                // Add interval to data and cache it
+                result.data.interval = config.interval;
+                cachedTrafficData = result.data;
+                
+                // Create charts
+                createTrafficCharts(result.data, portId);
+            } catch (error) {
+                console.error('Error fetching traffic data:', error);
+                showToast('Failed to load traffic chart', 'danger');
+            }
+        }
+        
+        function createTrafficCharts(data, portId) {
+            // Destroy existing charts if any
+            if (trafficChartRateInstance) {
+                trafficChartRateInstance.destroy();
+            }
+            if (trafficChartDataInstance) {
+                trafficChartDataInstance.destroy();
+            }
+            
+            // Create simple numeric labels (we won't display them, but keep timestamps for tooltips)
+            const labels = data.timestamps.map((_, index) => index + 1);
+            
+            // Store timestamps for tooltip display
+            const timestamps = data.timestamps;
+            
+            // Prepare data for rate chart (Mbps)
+            const rxRateData = data.rx_bps.map(v => v ? (v / 1000000).toFixed(3) : 0);
+            const txRateData = data.tx_bps.map(v => v ? (v / 1000000).toFixed(3) : 0);
+            
+            // Prepare data for transferred amount chart (MB)
+            // Each bps value from Mist represents the average rate during that specific sample period
+            // NOT over the entire requested interval - Mist returns multiple samples per interval
+            // Calculate data per sample: use the interval between samples (not the requested interval)
+            const sampleCount = data.rx_bps.length;
+            const timeRange = data.timestamps[data.timestamps.length - 1] - data.timestamps[0];
+            const sampleInterval = sampleCount > 1 ? timeRange / (sampleCount - 1) : data.interval;
+            
+            const rxDataTransferred = data.rx_bps.map(v => v ? ((v * sampleInterval / 8) / (1024 * 1024)).toFixed(2) : 0);
+            const txDataTransferred = data.tx_bps.map(v => v ? ((v * sampleInterval / 8) / (1024 * 1024)).toFixed(2) : 0);
+            
+            // Create Rate Chart
+            const ctxRate = document.getElementById('trafficChartRate').getContext('2d');
+            trafficChartRateInstance = createChart(ctxRate, labels, rxRateData, txRateData, 'Traffic Rate (Mbps)', ' Mbps', timestamps);
+            
+            // Create Data Transferred Chart
+            const ctxData = document.getElementById('trafficChartData').getContext('2d');
+            trafficChartDataInstance = createChart(ctxData, labels, rxDataTransferred, txDataTransferred, 'Data Transferred (MB)', ' MB', timestamps);
+        }
+        
+        function createChart(ctx, labels, rxData, txData, yAxisLabel, tooltipSuffix, timestamps) {
+            return new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'RX (Download)',
+                            data: rxData,
+                            borderColor: 'rgba(54, 162, 235, 1)',
+                            backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                            cubicInterpolationMode: 'monotone'
+                        },
+                        {
+                            label: 'TX (Upload)',
+                            data: txData,
+                            borderColor: 'rgba(75, 192, 192, 1)',
+                            backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                            cubicInterpolationMode: 'monotone'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                color: '#e0e0e0',
+                                font: {
+                                    size: 11
+                                },
+                                usePointStyle: true,
+                                padding: 10
+                            }
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                            titleColor: '#e0e0e0',
+                            bodyColor: '#e0e0e0',
+                            borderColor: '#E20074',
+                            borderWidth: 1,
+                            callbacks: {
+                                title: function(context) {
+                                    // Display formatted timestamp as title
+                                    if (timestamps && timestamps[context[0].dataIndex]) {
+                                        const ts = timestamps[context[0].dataIndex];
+                                        const date = new Date(ts * 1000);
+                                        return date.toLocaleString('en-US', {
+                                            month: 'short',
+                                            day: 'numeric',
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                            second: '2-digit'
+                                        });
+                                    }
+                                    return '';
+                                },
+                                label: function(context) {
+                                    return context.dataset.label + ': ' + context.parsed.y + tooltipSuffix;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            display: false,
+                            ticks: {
+                                display: false
+                            },
+                            grid: {
+                                display: false
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                color: '#e0e0e0',
+                                font: {
+                                    size: 10
+                                },
+                                callback: function(value) {
+                                    return value + tooltipSuffix;
+                                }
+                            },
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.1)'
+                            },
+                            title: {
+                                display: true,
+                                text: yAxisLabel,
+                                color: '#e0e0e0',
+                                font: {
+                                    size: 11
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // VPN Peer Paths Functions
+        async function loadVpnPeerStats(gateway) {
+            try {
+                const cacheKey = `${gateway.id}-${gateway.mac}`;
+                
+                // Check cache first
+                if (vpnPeerCache[cacheKey]) {
+                    updatePeerPathCells(gateway, vpnPeerCache[cacheKey]);
+                    return;
+                }
+                
+                // Use AbortController for timeout (30 seconds)
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 30000);
+                
+                const response = await fetch(
+                    `/api/gateway/${gateway.id}/vpn_peers?site_id=${gateway.site_id}&mac=${gateway.mac}`,
+                    { signal: controller.signal }
+                );
+                
+                clearTimeout(timeoutId);
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch VPN peer stats');
+                }
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    vpnPeerCache[cacheKey] = data.peers_by_port;
+                    updatePeerPathCells(gateway, data.peers_by_port);
+                } else {
+                    // No peers or error - mark as N/A
+                    gateway.ports.forEach(port => {
+                        const cellId = `peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                        const cell = document.getElementById(cellId);
+                        if (cell) {
+                            cell.innerHTML = '<span class="text-muted">-</span>';
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading VPN peer stats:', error);
+                // Mark all cells as error
+                gateway.ports.forEach(port => {
+                    const cellId = `peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                    const cell = document.getElementById(cellId);
+                    if (cell) {
+                        cell.innerHTML = '<span class="text-muted">-</span>';
+                    }
+                });
+            }
+        }
+        
+        function updatePeerPathCells(gateway, peersByPort) {
+            gateway.ports.forEach(port => {
+                const cellId = `peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                const cell = document.getElementById(cellId);
+                
+                if (!cell) return;
+                
+                // Try exact match first, then try to find peers for this port (with or without VLAN tag)
+                let peers = peersByPort[port.name] || [];
+                
+                // If no exact match, look for peers that start with this port name (e.g., ge-0/0/0.20 starts with ge-0/0/0)
+                if (peers.length === 0) {
+                    peers = [];
+                    for (const [portId, portPeers] of Object.entries(peersByPort)) {
+                        // Check if this peer's port_id starts with our port name (base interface match)
+                        if (portId.startsWith(port.name + '.') || portId === port.name) {
+                            peers.push(...portPeers);
+                        }
+                    }
+                }
+                
+                if (peers.length === 0) {
+                    cell.innerHTML = '<span class="text-muted">-</span>';
+                    return;
+                }
+                
+                const upCount = peers.filter(p => p.up).length;
+                const totalCount = peers.length;
+                const allUp = upCount === totalCount;
+                
+                const badgeClass = allUp ? 'bg-success' : 'bg-danger';
+                const iconClass = allUp ? 'bi-check-circle' : 'bi-exclamation-triangle';
+                
+                cell.innerHTML = `
+                    <span class="badge ${badgeClass} peer-paths-badge" 
+                          onclick="showPeerPathsModal('${gateway.id}', '${gateway.name}', '${port.name}', '${gateway.site_id}', '${gateway.mac}')"
+                          style="cursor: pointer;" 
+                          title="Click to view peer path details">
+                        <i class="bi ${iconClass}"></i> ${upCount}/${totalCount}
+                    </span>
+                `;
+            });
+        }
+        
+        async function showPeerPathsModal(gatewayId, gatewayName, portName, siteId, mac) {
+            const cacheKey = `${gatewayId}-${mac}`;
+            const peersByPort = vpnPeerCache[cacheKey];
+            
+            if (!peersByPort) {
+                showToast('Peer path data not available', 'danger');
+                return;
+            }
+            
+            // Try exact match first, then look for peers with VLAN tags on this base interface
+            let peers = peersByPort[portName] || [];
+            
+            if (peers.length === 0) {
+                peers = [];
+                for (const [portId, portPeers] of Object.entries(peersByPort)) {
+                    if (portId.startsWith(portName + '.') || portId === portName) {
+                        peers.push(...portPeers);
+                    }
+                }
+            }
+            
+            if (peers.length === 0) {
+                showToast('No peer paths found for this port', 'info');
+                return;
+            }
+            
+            // Build modal content
+            const modalTitle = document.getElementById('peerPathsModalTitle');
+            const modalBody = document.getElementById('peerPathsModalBody');
+            
+            modalTitle.textContent = `VPN Peer Paths - ${gatewayName} - ${portName}`;
+            
+            const tableHtml = `
+                <div class="table-responsive">
+                    <table class="table table-sm table-dark table-hover mb-0" style="font-size: 0.875rem;">
+                        <thead>
+                            <tr>
+                                <th style="white-space: nowrap;">Status</th>
+                                <th style="min-width: 120px;">VPN Name</th>
+                                <th style="min-width: 100px;">Peer Router</th>
+                                <th style="min-width: 100px;">Peer Port</th>
+                                <th style="white-space: nowrap;">Type</th>
+                                <th style="white-space: nowrap;">Latency<br><small class="text-muted">(ms)</small></th>
+                                <th style="white-space: nowrap;">Loss<br><small class="text-muted">(%)</small></th>
+                                <th style="white-space: nowrap;">Jitter<br><small class="text-muted">(ms)</small></th>
+                                <th style="white-space: nowrap;">MOS</th>
+                                <th style="white-space: nowrap;">Uptime</th>
+                                <th style="white-space: nowrap;">MTU</th>
+                                <th style="white-space: nowrap;">Hops</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${peers.map(peer => {
+                                const uptimeHours = Math.floor(peer.uptime / 3600);
+                                const uptimeDays = Math.floor(uptimeHours / 24);
+                                const uptimeDisplay = uptimeDays > 0 ? `${uptimeDays}d ${uptimeHours % 24}h` : `${uptimeHours}h`;
+                                const statusBadge = peer.up ? '<span class="badge bg-success"><i class="bi bi-check-circle"></i></span>' : '<span class="badge bg-danger"><i class="bi bi-x-circle"></i></span>';
+                                const activeBadge = peer.is_active ? '<i class="bi bi-star-fill text-warning ms-1" title="Active Path"></i>' : '';
+                                
+                                // Color code metrics
+                                const latencyClass = peer.latency < 50 ? 'text-success' : peer.latency < 100 ? 'text-warning' : 'text-danger';
+                                const lossClass = peer.loss < 1 ? 'text-success' : peer.loss < 5 ? 'text-warning' : 'text-danger';
+                                const jitterClass = peer.jitter < 10 ? 'text-success' : peer.jitter < 20 ? 'text-warning' : 'text-danger';
+                                const mosClass = peer.mos >= 4.0 ? 'text-success' : peer.mos >= 3.5 ? 'text-warning' : 'text-danger';
+                                
+                                return `
+                                    <tr>
+                                        <td style="white-space: nowrap;">${statusBadge}${activeBadge}</td>
+                                        <td><small>${peer.vpn_name}</small></td>
+                                        <td><small>${peer.peer_router_name}</small></td>
+                                        <td><small>${peer.peer_port_id}</small></td>
+                                        <td><span class="badge bg-secondary" style="font-size: 0.7rem;">${peer.type.toUpperCase()}</span></td>
+                                        <td class="${latencyClass}" style="text-align: right;">${peer.latency.toFixed(1)}</td>
+                                        <td class="${lossClass}" style="text-align: right;">${peer.loss.toFixed(2)}</td>
+                                        <td class="${jitterClass}" style="text-align: right;">${peer.jitter.toFixed(1)}</td>
+                                        <td class="${mosClass}" style="text-align: right; font-weight: bold;">${peer.mos.toFixed(1)}</td>
+                                        <td style="white-space: nowrap;"><small>${uptimeDisplay}</small></td>
+                                        <td style="text-align: right;"><small>${peer.mtu}</small></td>
+                                        <td style="text-align: center;"><small>${peer.hop_count}</small></td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+                <div class="mt-3 p-3 bg-dark rounded">
+                    <p class="text-light mb-2" style="font-weight: 500;"><i class="bi bi-graph-up"></i> Summary Statistics</p>
+                    <div class="row g-2">
+                        <div class="col-6 col-md-4 col-lg-2">
+                            <div class="text-center p-2 bg-secondary rounded">
+                                <div class="text-muted" style="font-size: 0.75rem;">Total Paths</div>
+                                <div class="text-light" style="font-size: 1.25rem; font-weight: bold;">${peers.length}</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-4 col-lg-2">
+                            <div class="text-center p-2 bg-success bg-opacity-25 rounded">
+                                <div class="text-muted" style="font-size: 0.75rem;">Up</div>
+                                <div class="text-success" style="font-size: 1.25rem; font-weight: bold;">${peers.filter(p => p.up).length}</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-4 col-lg-2">
+                            <div class="text-center p-2 bg-warning bg-opacity-25 rounded">
+                                <div class="text-muted" style="font-size: 0.75rem;">Active</div>
+                                <div class="text-warning" style="font-size: 1.25rem; font-weight: bold;">${peers.filter(p => p.is_active).length}</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-4 col-lg-2">
+                            <div class="text-center p-2 bg-info bg-opacity-25 rounded">
+                                <div class="text-muted" style="font-size: 0.75rem;">Avg Latency</div>
+                                <div class="text-info" style="font-size: 1.25rem; font-weight: bold;">${(peers.reduce((sum, p) => sum + p.latency, 0) / peers.length).toFixed(1)}<small style="font-size: 0.7rem;">ms</small></div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-4 col-lg-2">
+                            <div class="text-center p-2 bg-primary bg-opacity-25 rounded">
+                                <div class="text-muted" style="font-size: 0.75rem;">Avg Loss</div>
+                                <div class="text-primary" style="font-size: 1.25rem; font-weight: bold;">${(peers.reduce((sum, p) => sum + p.loss, 0) / peers.length).toFixed(2)}<small style="font-size: 0.7rem;">%</small></div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-4 col-lg-2">
+                            <div class="text-center p-2 bg-success bg-opacity-25 rounded">
+                                <div class="text-muted" style="font-size: 0.75rem;">Avg MOS</div>
+                                <div class="text-success" style="font-size: 1.25rem; font-weight: bold;">${(peers.reduce((sum, p) => sum + p.mos, 0) / peers.length).toFixed(1)}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            modalBody.innerHTML = tableHtml;
+            
+            // Show modal
+            const modal = new bootstrap.Modal(document.getElementById('peerPathsModal'));
+            modal.show();
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+# Development docker-compose with hot reload
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: mist-redis-dev
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # Worker with shorter interval for development
+  worker:
+    build: .
+    container_name: mist-worker-dev
+    command: python worker.py
+    volumes:
+      - .:/app
+    environment:
+      - MIST_API_TOKEN=${MIST_API_TOKEN}
+      - MIST_ORG_ID=${MIST_ORG_ID:-}
+      - MIST_HOST=${MIST_HOST:-api.mist.com}
+      - REDIS_URL=redis://redis:6379
+      - WORKER_INTERVAL=60
+      - LOG_LEVEL=DEBUG
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # Web app with Flask debug mode
+  web:
+    build: .
+    container_name: mist-web-dev
+    command: python app.py
+    volumes:
+      - .:/app
+    ports:
+      - "5000:5000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=DEBUG
+      - FLASK_DEBUG=1
+    depends_on:
+      redis:
+        condition: service_healthy

@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  # Redis with AOF persistence
+  redis:
+    image: redis:7-alpine
+    container_name: mist-redis
+    command: redis-server --appendonly yes --save 300 1
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Background worker - fetches data from Mist API
+  worker:
+    build: .
+    container_name: mist-worker
+    command: python worker.py
+    environment:
+      - MIST_API_TOKEN=${MIST_API_TOKEN}
+      - MIST_ORG_ID=${MIST_ORG_ID:-}
+      - MIST_HOST=${MIST_HOST:-api.mist.com}
+      - REDIS_URL=redis://redis:6379
+      - WORKER_INTERVAL=${WORKER_INTERVAL:-300}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Web application - serves cached data
+  web:
+    build: .
+    container_name: mist-web
+    command: gunicorn --bind 0.0.0.0:5000 --workers 2 --threads 4 app:app
+    ports:
+      - "5000:5000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+    driver: local
