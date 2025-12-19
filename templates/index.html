@@ -888,9 +888,88 @@
         
         // Insights data cache (populated in phase 3)
         let insightsCache = {};
+        let statusPollInterval = null;
+        
+        function showWorkerStatus(loadingPhase) {
+            // Show worker loading phase in the progress bar
+            const phaseMap = {
+                'org_sites': { num: 1, text: 'Loading sites...' },
+                'gateways': { num: 1, text: 'Loading gateways...' },
+                'vpn_peers': { num: 2, text: 'Loading VPN peers...' },
+                'insights': { num: 3, text: 'Loading traffic data...' },
+                'complete': { num: 4, text: 'Complete' }
+            };
+            
+            const phase = phaseMap[loadingPhase.current_phase] || { num: 0, text: 'Starting...' };
+            document.getElementById('phaseStatusText').textContent = 
+                `Worker: ${loadingPhase.details?.description || phase.text}`;
+            
+            // Update progress bar
+            const progress = (phase.num / 4) * 100;
+            document.getElementById('persistentProgress').style.width = `${progress}%`;
+            document.getElementById('phaseProgressBar').style.display = 'block';
+        }
+        
+        async function pollForData() {
+            try {
+                const statusResponse = await fetch('/api/status');
+                const statusData = await statusResponse.json();
+                
+                if (statusData.success) {
+                    const loadingPhase = statusData.data.loading_phase;
+                    const cacheValid = statusData.data.cache_valid;
+                    
+                    // Update status display
+                    if (loadingPhase) {
+                        showWorkerStatus(loadingPhase);
+                    }
+                    
+                    // If cache is now valid, load the data
+                    if (cacheValid) {
+                        clearInterval(statusPollInterval);
+                        statusPollInterval = null;
+                        loadData();  // Reload with data
+                    }
+                }
+            } catch (error) {
+                console.error('Error polling status:', error);
+            }
+        }
         
         async function loadData() {
             try {
+                // First check if cache has data and worker status
+                const statusResponse = await fetch('/api/status');
+                const statusData = await statusResponse.json();
+                
+                if (statusData.success) {
+                    const loadingPhase = statusData.data.loading_phase;
+                    const cacheValid = statusData.data.cache_valid;
+                    
+                    // Show worker loading status in UI
+                    if (loadingPhase && loadingPhase.current_phase !== 'complete') {
+                        showWorkerStatus(loadingPhase);
+                    }
+                    
+                    // If no cache data yet, wait and poll
+                    if (!cacheValid) {
+                        document.getElementById('loadingMessage').textContent = 
+                            'Waiting for worker to fetch data... ' + (loadingPhase?.details?.description || '');
+                        
+                        // Start polling for data
+                        if (!statusPollInterval) {
+                            statusPollInterval = setInterval(pollForData, 3000);
+                        }
+                        return;
+                    }
+                }
+                
+                // Clear polling if we have data
+                if (statusPollInterval) {
+                    clearInterval(statusPollInterval);
+                    statusPollInterval = null;
+                }
+                
                 // ======== PHASE 1: Load Gateways ========
                 updatePhase(1, 'active', 'Fetching...');
                 document.getElementById('loadingMessage').textContent = 'Fetching gateway data...';

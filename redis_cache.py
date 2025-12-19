@@ -7,6 +7,7 @@ and traffic insights.
 
 import os
 import json
+import time
 import logging
 from typing import Any, Optional
 
@@ -312,6 +313,30 @@ class RedisCache:
             logger.error(f"Error storing worker status: {e}")
             return False
     
+    def set_loading_phase(self, phase: str, total_phases: int = 4, details: Optional[dict[str, Any]] = None) -> bool:
+        """Store current loading phase for progressive status display"""
+        try:
+            phase_data = {
+                'current_phase': phase,
+                'total_phases': total_phases,
+                'details': details or {},
+                'timestamp': time.time()
+            }
+            self.client.set(f"{self.PREFIX_METADATA}:loading_phase", self._serialize(phase_data))
+            return True
+        except Exception as e:
+            logger.error(f"Error storing loading phase: {e}")
+            return False
+    
+    def get_loading_phase(self) -> Optional[dict[str, Any]]:
+        """Retrieve current loading phase"""
+        try:
+            data = self.client.get(f"{self.PREFIX_METADATA}:loading_phase")
+            return self._deserialize(data)
+        except Exception as e:
+            logger.error(f"Error retrieving loading phase: {e}")
+            return None
+    
     def get_worker_status(self) -> Optional[dict[str, Any]]:
         """Retrieve worker status"""
         try:
@@ -346,7 +371,7 @@ class RedisCache:
             logger.error(f"Error clearing cache: {e}")
             return False
     
-    def get_cache_stats(self) -> Dict:
+    def get_cache_stats(self) -> dict[str, Any]:
         """Get cache statistics"""
         try:
             stats = {

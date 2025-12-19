@@ -49,15 +49,17 @@ def index():
 
 @app.route('/api/status')
 def api_status():
-    """Get cache and worker status"""
+    """Get cache and worker status including loading phase"""
     try:
         c = get_cache()
         stats = c.get_cache_stats()
+        loading_phase = c.get_loading_phase()
         return jsonify({
             'success': True,
             'data': {
                 'cache_valid': c.is_cache_valid(),
-                'stats': stats
+                'stats': stats,
+                'loading_phase': loading_phase
             }
         })
     except Exception as e:

@@ -57,8 +57,16 @@ class DataWorker:
     def connect(self) -> bool:
         """Establish connections to Mist API and Redis"""
         try:
+            # Get API token from environment
+            api_token = os.environ.get('MIST_API_TOKEN') or os.environ.get('MIST_APITOKEN')
+            if not api_token:
+                raise ValueError("MIST_API_TOKEN or MIST_APITOKEN environment variable is required")
+            
+            org_id = os.environ.get('MIST_ORG_ID')
+            host = os.environ.get('MIST_HOST', 'api.mist.com')
+            
             # Connect to Mist
-            self.mist = MistConnection()
+            self.mist = MistConnection(api_token=api_token, org_id=org_id, host=host)
             logger.info(f"Connected to Mist API: {self.mist.host}")
             
             # Connect to Redis
@@ -71,7 +79,7 @@ class DataWorker:
             return False
     
     def fetch_and_cache_all(self):
-        """Fetch all data from Mist API and store in Redis"""
+        """Fetch all data from Mist API and store in Redis progressively"""
         start_time = time.time()
         logger.info("=== Starting data refresh ===")
         
@@ -79,25 +87,34 @@ class DataWorker:
             self.cache.set_worker_status('running', {'started': datetime.now().isoformat()})
             
             # Phase 1: Organization and Sites
+            self.cache.set_loading_phase('org_sites', 4, {'description': 'Fetching organization and sites...'})
             logger.info("Phase 1: Fetching organization and sites...")
             self._fetch_org_and_sites()
             
-            # Phase 2: Gateway Stats
+            # Phase 2: Gateway Stats - cache immediately so web can show data
+            self.cache.set_loading_phase('gateways', 4, {'description': 'Fetching gateway statistics...'})
             logger.info("Phase 2: Fetching gateway statistics...")
             gateways = self._fetch_gateways()
             
+            # Update timestamp after gateways so web knows data is available
+            if gateways:
+                self.cache.set_last_update(time.time())
+            
             if gateways:
                 # Phase 3: VPN Peer Paths
+                self.cache.set_loading_phase('vpn_peers', 4, {'description': 'Fetching VPN peer paths...', 'gateways_loaded': len(gateways)})
                 logger.info("Phase 3: Fetching VPN peer paths...")
                 self._fetch_vpn_peers(gateways)
                 
                 # Phase 4: Traffic Insights
+                self.cache.set_loading_phase('insights', 4, {'description': 'Fetching traffic insights...', 'gateways_loaded': len(gateways)})
                 logger.info("Phase 4: Fetching traffic insights...")
                 self._fetch_insights(gateways)
             
-            # Update metadata
+            # Mark as complete
             elapsed = time.time() - start_time
             self.cache.set_last_update(time.time())
+            self.cache.set_loading_phase('complete', 4, {'description': 'All data loaded', 'duration_seconds': round(elapsed, 2)})
             self.cache.set_worker_status('idle', {
                 'last_run': datetime.now().isoformat(),
                 'duration_seconds': round(elapsed, 2),

@@ -22,8 +22,10 @@ services:
     build: .
     container_name: mist-worker
     command: python worker.py
+    env_file:
+      - .env
     environment:
-      - MIST_API_TOKEN=${MIST_API_TOKEN}
+      - MIST_API_TOKEN=${MIST_APITOKEN}
       - MIST_ORG_ID=${MIST_ORG_ID:-}
       - MIST_HOST=${MIST_HOST:-api.mist.com}
       - REDIS_URL=redis://redis:6379
