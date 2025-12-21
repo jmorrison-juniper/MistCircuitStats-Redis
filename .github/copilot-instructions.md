@@ -60,11 +60,20 @@ This version separates API fetching (worker) from serving (web app) to support m
 - API responses have `.status_code` and `.data` attributes
 - Check status_code == 200 for successful responses
 - Multi-token support: SDK rotates tokens on 429 rate limit
-- Key endpoints:
-  - `mistapi.api.v1.self.self.getSelf()` - Get user info
-  - `mistapi.api.v1.orgs.sites.listOrgSites()` - List sites
-  - `mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts()` - Port stats
-  - Insights API via direct requests for traffic data
+
+## Mist API Endpoints Used
+
+| API Endpoint | Method | Description |
+|--------------|--------|-------------|
+| `mistapi.api.v1.self.self.getSelf` | GET | Get current API token info and privileges |
+| `mistapi.api.v1.orgs.orgs.getOrg` | GET | Get organization details |
+| `mistapi.api.v1.orgs.sites.listOrgSites` | GET | List all sites in organization |
+| `mistapi.api.v1.orgs.stats.listOrgDevicesStats` | GET | List gateway device statistics (type=gateway) |
+| `mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts` | GET | Search WAN port statistics (paginated) |
+| `/api/v1/orgs/{org_id}/stats/vpn_peers/search` | GET | VPN peer path statistics (per device) |
+| `/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats` | GET | Port-specific time-series traffic data |
+
+> **Note**: VPN peers and Insights use direct HTTP requests (not SDK) due to SDK limitations
 
 ## Container Development Guidelines
 - Docker Compose services: redis, worker, web

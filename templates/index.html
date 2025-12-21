@@ -474,30 +474,54 @@
 
     <!-- Main Content -->
     <div class="container-fluid mt-2">
-        <!-- Summary Stats -->
+        <!-- Summary Stats - Row 1 -->
         <div class="row mb-2">
-            <div class="col-md-3">
+            <div class="col">
                 <div class="card stats-card">
                     <div class="stats-value" id="totalGateways">-</div>
                     <div class="stats-label">Total Gateways</div>
                 </div>
             </div>
-            <div class="col-md-3">
+            <div class="col">
                 <div class="card stats-card">
                     <div class="stats-value" id="connectedGateways">-</div>
                     <div class="stats-label">Connected</div>
                 </div>
             </div>
-            <div class="col-md-3">
+            <div class="col">
                 <div class="card stats-card">
                     <div class="stats-value" id="totalPorts">-</div>
                     <div class="stats-label">Total WAN Ports</div>
                 </div>
             </div>
-            <div class="col-md-3">
+            <div class="col">
                 <div class="card stats-card">
                     <div class="stats-value" id="activePorts">-</div>
                     <div class="stats-label">Active Ports</div>
+                </div>
+            </div>
+            <div class="col">
+                <div class="card stats-card">
+                    <div class="stats-value" id="totalSites">-</div>
+                    <div class="stats-label">Sites</div>
+                </div>
+            </div>
+            <div class="col">
+                <div class="card stats-card">
+                    <div class="stats-value" id="vpnPeersCount">-</div>
+                    <div class="stats-label">VPN Peers</div>
+                </div>
+            </div>
+            <div class="col">
+                <div class="card stats-card">
+                    <div class="stats-value" id="profilesCount">-</div>
+                    <div class="stats-label">Profiles</div>
+                </div>
+            </div>
+            <div class="col">
+                <div class="card stats-card">
+                    <div class="stats-value" id="templatesCount">-</div>
+                    <div class="stats-label">Templates</div>
                 </div>
             </div>
         </div>
@@ -685,6 +709,7 @@
     <script>
         let allGateways = [];
         let allSites = [];
+        let allTemplates = {};  // Template ID -> template data
         let currentDuration = '7d';  // Always fetch 7 days of data
         let vpnPeerCache = {};
         let cachedTrafficData = null;  // Cache for 7-day traffic data
@@ -872,16 +897,41 @@
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {
             startLoadingProgress();
+            loadCacheStats();  // Load cache stats immediately
             loadData();
             fetchTokenStatus();
             
             // Refresh token status every 5 minutes
             tokenStatusInterval = setInterval(fetchTokenStatus, TOKEN_STATUS_REFRESH_MS);
             
+            // Refresh cache stats every 30 seconds
+            setInterval(loadCacheStats, 30000);
+            
             // Setup search
             document.getElementById('searchInput').addEventListener('input', filterGateways);
             document.getElementById('siteFilter').addEventListener('change', filterGateways);
         });
+        
+        async function loadCacheStats() {
+            try {
+                const response = await fetch('/api/cache-stats');
+                const data = await response.json();
+                
+                if (data.success && data.data) {
+                    const stats = data.data;
+                    document.getElementById('totalGateways').textContent = stats.gateways_count || 0;
+                    document.getElementById('connectedGateways').textContent = stats.connected_count || 0;
+                    document.getElementById('totalPorts').textContent = stats.total_ports || 0;
+                    document.getElementById('activePorts').textContent = stats.active_ports || 0;
+                    document.getElementById('totalSites').textContent = stats.sites_count || 0;
+                    document.getElementById('vpnPeersCount').textContent = stats.vpn_peers_count || 0;
+                    document.getElementById('profilesCount').textContent = stats.profiles_count || 0;
+                    document.getElementById('templatesCount').textContent = stats.templates_count || 0;
+                }
+            } catch (error) {
+                console.error('Error loading cache stats:', error);
+            }
+        }
         
         // Removed changeTimeframe function - now always fetching 7d data
         // Chart view filtering is handled by filterChartData()
@@ -989,6 +1039,14 @@
                     populateSiteFilter();
                 }
                 
+                // Load templates for override comparison
+                const templatesResponse = await fetch('/api/templates');
+                const templatesData = await templatesResponse.json();
+                if (templatesData.success) {
+                    allTemplates = templatesData.data;
+                    console.log(`Loaded ${Object.keys(allTemplates).length} templates`);
+                }
+                
                 // Load gateways (always fetches 7-day data)
                 const gatewaysResponse = await fetch('/api/gateways');
                 const gatewaysData = await gatewaysResponse.json();
@@ -1050,8 +1108,8 @@
                     // Update all gateway VPN displays
                     allGateways.forEach(gateway => {
                         const cacheKey = `${gateway.id}-${gateway.mac}`;
-                        const peersByPort = vpnPeerCache[cacheKey] || {};
-                        updateVpnBadgesForGateway(gateway, peersByPort);
+                        const peerData = vpnPeerCache[cacheKey] || {};
+                        updatePeerPathsCells(gateway, peerData);
                     });
                 }
             } catch (error) {
@@ -1129,9 +1187,9 @@
         
         function updateStats() {
             const connected = allGateways.filter(gw => gw.status === 'connected').length;
-            const totalPorts = allGateways.reduce((sum, gw) => sum + gw.num_ports, 0);
+            const totalPorts = allGateways.reduce((sum, gw) => sum + (gw.ports ? gw.ports.length : 0), 0);
             const activePorts = allGateways.reduce((sum, gw) => 
-                sum + gw.ports.filter(p => p.up).length, 0);
+                sum + (gw.ports ? gw.ports.filter(p => p.up).length : 0), 0);
             
             document.getElementById('totalGateways').textContent = allGateways.length;
             document.getElementById('connectedGateways').textContent = connected;
@@ -1162,17 +1220,24 @@
             });
         }
         
-        function updatePeerPathsCells(gateway, peersByPort) {
+        function updatePeerPathsCells(gateway, peerData) {
             // Update peer paths cells with cached data
+            // peerData structure: { success: true, peers_by_port: { "ge-0/0/0": [...], ... }, total_peers: N }
+            const peersByPort = peerData.peers_by_port || peerData || {};
+            
             gateway.ports.forEach(port => {
-                const safePortName = port.name.replace(/[^a-zA-Z0-9]/g, '_');
+                const portName = port.name || port.port_id || 'Unknown';
+                const safePortName = portName.replace(/[^a-zA-Z0-9]/g, '_');
                 const cellId = `peer-paths-${gateway.id}-${safePortName}`;
                 const cell = document.getElementById(cellId);
                 
                 if (cell) {
-                    const peerCount = peersByPort[port.name] || 0;
-                    if (peerCount > 0) {
-                        cell.innerHTML = `<span class="badge bg-info clickable-peers" style="cursor: pointer;" onclick="event.stopPropagation(); showPeerPathsModal('${gateway.id}', '${gateway.mac}', '${port.name}', '${gateway.name}')">${peerCount} peers</span>`;
+                    const peers = peersByPort[portName];
+                    if (Array.isArray(peers) && peers.length > 0) {
+                        const totalCount = peers.length;
+                        const upCount = peers.filter(p => p.up).length;
+                        const badgeClass = upCount === totalCount ? 'bg-success' : upCount > 0 ? 'bg-warning' : 'bg-danger';
+                        cell.innerHTML = `<span class="badge ${badgeClass} clickable-peers" style="cursor: pointer;" onclick="event.stopPropagation(); showPeerPathsModal('${gateway.id}', '${gateway.mac}', '${portName}', '${gateway.name}')">${upCount}/${totalCount}</span>`;
                     } else {
                         cell.innerHTML = `<span class="text-muted">-</span>`;
                     }
@@ -1253,7 +1318,7 @@
                 <td>${gateway.model}</td>
                 <td><span class="badge ${statusClass}">${gateway.status}</span></td>
                 <td>${gateway.ip || 'N/A'}</td>
-                <td>${gateway.num_ports}</td>
+                <td>${gateway.ports ? gateway.ports.length : 0}</td>
                 <td>${uptimeDisplay}</td>
             `;
             
@@ -1288,38 +1353,73 @@
                         </thead>
                         <tbody>
                             ${gateway.ports.map(port => {
-                                // Use vlan_id from backend, fallback to parsing from port name
-                                const vlan = port.vlan_id || (port.name.match(/\.(\d+)$/) ? port.name.match(/\.(\d+)$/)[1] : '-');
+                                // Map API fields to display fields
+                                const portName = port.name || port.port_id || 'Unknown';
+                                const description = port.description || port.port_desc || '-';
+                                const wanName = port.wan_name || (port.vpn_overlays && port.vpn_overlays[0] ? port.vpn_overlays[0].wan_name : '') || '-';
+                                const vlan = port.vlan_id || (portName.match(/\.(\d+)$/) ? portName.match(/\.(\d+)$/)[1] : '-');
+                                
+                                // Runtime type from address_mode (what device is actually running)
+                                const addressMode = (port.address_mode || '').toLowerCase();
+                                const runtimeType = addressMode === 'dynamic' ? 'dhcp' : (addressMode === 'static' ? 'static' : '');
+                                
+                                // Get template type by looking up site's assigned template
+                                // 1. Find the site for this gateway
+                                // 2. Get the site's gatewaytemplate_id
+                                // 3. Look up that template's port_config for this port
+                                let templateType = '';
+                                const site = allSites.find(s => s.id === gateway.site_id);
+                                if (site && site.gatewaytemplate_id && allTemplates[site.gatewaytemplate_id]) {
+                                    const template = allTemplates[site.gatewaytemplate_id];
+                                    const portConfig = template.port_config?.[portName];
+                                    if (portConfig && portConfig.ip_config) {
+                                        templateType = portConfig.ip_config.type || 'dhcp';
+                                    }
+                                }
+                                
+                                // Override = runtime type doesn't match template type
+                                const isOverride = runtimeType && templateType && runtimeType !== templateType;
+                                
+                                const isEnabled = port.enabled !== undefined ? port.enabled : (port.up || false);
+                                
+                                // For gateway IP, only show if it's a static port with a configured gateway
+                                // DHCP ports learn gateway dynamically and Mist API doesn't expose the learned value
+                                let gatewayIP = '-';
+                                if (runtimeType === 'static' && site && site.gatewaytemplate_id && allTemplates[site.gatewaytemplate_id]) {
+                                    const template = allTemplates[site.gatewaytemplate_id];
+                                    const portConfig = template.port_config?.[portName];
+                                    if (portConfig && portConfig.ip_config && portConfig.ip_config.gateway) {
+                                        gatewayIP = portConfig.ip_config.gateway;
+                                    }
+                                }
                                 
                                 return `
                                 <tr>
-                                    <td><strong>${port.name}</strong></td>
-                                    <td>${port.wan_name || '-'}</td>
-                                    <td>${port.description || '-'}</td>
+                                    <td><strong>${portName}</strong></td>
+                                    <td>${wanName}</td>
+                                    <td>${description}</td>
                                     <td>
-                                        <span class="badge ${port.enabled ? 'bg-success' : 'bg-danger'}">
-                                            ${port.enabled ? 'Enabled' : 'Disabled'}
-                                        </span>
+                                        <span class="badge ${isEnabled ? 'bg-success' : 'bg-danger'}">${isEnabled ? 'Enabled' : 'Disabled'}</span>
                                     </td>
                                     <td>
-                                        <span class="badge ${port.up ? 'bg-success' : 'bg-danger'}">
-                                            ${port.up ? 'Up' : 'Down'}
-                                        </span>
+                                        ${port.up !== undefined ?
+                                            `<span class="badge ${port.up ? 'bg-success' : 'bg-danger'}">${port.up ? 'Up' : 'Down'}</span>` :
+                                            '<span class="text-muted">-</span>'}
                                     </td>
-                                    <td>${port.gateway || '-'}</td>
+                                    <td>${gatewayIP}</td>
                                     <td>${port.ip || '-'}</td>
                                     <td>${vlan}</td>
                                     <td>${port.netmask ? '/' + port.netmask : '-'}</td>
-                                    <td><span class="badge ${port.type === 'static' ? 'bg-success' : 'bg-primary'}">${port.type.toUpperCase()}</span></td>
-                                    <td><span class="badge ${port.override === 'yes' ? 'bg-danger' : 'bg-success'}">${port.override.toUpperCase()}</span></td>
-                                    <td id="peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}">
-                                        <span class="text-muted"><i class="bi bi-hourglass-split"></i> Loading...</span>
+                                    <td>${runtimeType ? `<span class="badge ${runtimeType === 'static' ? 'bg-success' : 'bg-primary'}">${runtimeType.toUpperCase()}</span>` : '<span class="text-muted">-</span>'}</td>
+                                    <td><span class="badge ${isOverride ? 'bg-danger' : 'bg-success'}">${isOverride ? 'YES' : 'NO'}</span></td>
+                                    <td id="peer-paths-${gateway.id}-${portName.replace(/[^a-zA-Z0-9]/g, '_')}">
+                                        <span class="text-muted"><i class="bi bi-hourglass-split"></i></span>
                                     </td>
-                                    <td class="traffic-cell" id="rx-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}" onclick="showTrafficChart('${gateway.site_id}', '${gateway.id}', '${port.name}', '${gateway.name}')" title="Click to view traffic chart">
-                                        ${port.rx_bytes ? formatBytes(port.rx_bytes) : '<span class="text-muted"><i class="bi bi-hourglass-split"></i></span>'}
+                                    <td class="traffic-cell" id="rx-${gateway.id}-${portName.replace(/[^a-zA-Z0-9]/g, '_')}" onclick="showTrafficChart('${gateway.site_id}', '${gateway.id}', '${portName}', '${gateway.name}')" title="Click to view traffic chart">
+                                        ${port.rx_bytes ? formatBytes(port.rx_bytes) : '<span class="text-muted">-</span>'}
                                     </td>
-                                    <td class="traffic-cell" id="tx-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}" onclick="showTrafficChart('${gateway.site_id}', '${gateway.id}', '${port.name}', '${gateway.name}')" title="Click to view traffic chart">
-                                        ${port.tx_bytes ? formatBytes(port.tx_bytes) : '<span class="text-muted"><i class="bi bi-hourglass-split"></i></span>'}
+                                    <td class="traffic-cell" id="tx-${gateway.id}-${portName.replace(/[^a-zA-Z0-9]/g, '_')}" onclick="showTrafficChart('${gateway.site_id}', '${gateway.id}', '${portName}', '${gateway.name}')" title="Click to view traffic chart">
+                                        ${port.tx_bytes ? formatBytes(port.tx_bytes) : '<span class="text-muted">-</span>'}
                                     </td>
                                 </tr>`;
                             }).join('')}
@@ -1399,17 +1499,37 @@
                 
                 if (gateway.ports && gateway.ports.length > 0) {
                     gateway.ports.forEach(port => {
+                        // Use port_id as fallback for port name
+                        const portName = port.name || port.port_id || 'Unknown';
                         // Use vlan_id from backend, fallback to parsing from port name
-                        const vlan = port.vlan_id || (port.name.match(/\.(\d+)$/) ? port.name.match(/\.(\d+)$/)[1] : '-');
+                        const vlan = port.vlan_id || (portName.match(/\.(\d+)$/) ? portName.match(/\.(\d+)$/)[1] : '-');
+                        
+                        // Runtime type from address_mode
+                        const addressMode = (port.address_mode || '').toLowerCase();
+                        const runtimeType = addressMode === 'dynamic' ? 'dhcp' : (addressMode === 'static' ? 'static' : '');
+                        
+                        // Get template type by looking up site's assigned template
+                        let templateType = '';
+                        const site = allSites.find(s => s.id === gateway.site_id);
+                        if (site && site.gatewaytemplate_id && allTemplates[site.gatewaytemplate_id]) {
+                            const template = allTemplates[site.gatewaytemplate_id];
+                            const portConfig = template.port_config?.[portName];
+                            if (portConfig && portConfig.ip_config) {
+                                templateType = portConfig.ip_config.type || 'dhcp';
+                            }
+                        }
+                        
+                        // Override = runtime != template
+                        const isOverride = runtimeType && templateType && runtimeType !== templateType;
                         
                         // Get peer paths - try exact match first, then look for VLAN-tagged ports
-                        let peers = peersByPort[port.name] || [];
+                        let peers = peersByPort[portName] || [];
                         
                         // If no exact match, look for peers that start with this port name (e.g., ge-0/0/0.20 starts with ge-0/0/0)
                         if (peers.length === 0) {
                             peers = [];
                             for (const [portId, portPeers] of Object.entries(peersByPort)) {
-                                if (portId.startsWith(port.name + '.') || portId === port.name) {
+                                if (portId.startsWith(portName + '.') || portId === portName) {
                                     peers.push(...portPeers);
                                 }
                             }
@@ -1419,6 +1539,16 @@
                         const totalCount = peers.length;
                         // Use 'of' instead of '/' to prevent Excel from converting to date
                         const peerPathsStr = totalCount > 0 ? `${upCount} of ${totalCount}` : '-';
+                        
+                        // For gateway IP, only show for static ports with configured gateway
+                        let gatewayIP = '';
+                        if (runtimeType === 'static' && site && site.gatewaytemplate_id && allTemplates[site.gatewaytemplate_id]) {
+                            const template = allTemplates[site.gatewaytemplate_id];
+                            const portConfig = template.port_config?.[portName];
+                            if (portConfig && portConfig.ip_config && portConfig.ip_config.gateway) {
+                                gatewayIP = portConfig.ip_config.gateway;
+                            }
+                        }
                         
                         rows.push([
                             siteName,
@@ -1432,12 +1562,12 @@
                             port.description || '',
                             port.enabled ? 'Enabled' : 'Disabled',
                             port.up ? 'Up' : 'Down',
-                            port.gateway || '',
+                            gatewayIP,
                             port.ip || '',
                             vlan,
                             port.netmask ? '/' + port.netmask : '',
-                            port.type ? port.type.toUpperCase() : '',
-                            port.override ? port.override.toUpperCase() : '',
+                            runtimeType ? runtimeType.toUpperCase() : '',
+                            isOverride ? 'YES' : 'NO',
                             peerPathsStr,
                             port.rx_bytes || 0,
                             port.tx_bytes || 0
@@ -1802,7 +1932,8 @@
                 } else {
                     // No peers or error - mark as N/A
                     gateway.ports.forEach(port => {
-                        const cellId = `peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                        const portName = port.name || port.port_id || 'Unknown';
+                        const cellId = `peer-paths-${gateway.id}-${portName.replace(/[^a-zA-Z0-9]/g, '_')}`;
                         const cell = document.getElementById(cellId);
                         if (cell) {
                             cell.innerHTML = '<span class="text-muted">-</span>';
@@ -1813,7 +1944,8 @@
                 console.error('Error loading VPN peer stats:', error);
                 // Mark all cells as error
                 gateway.ports.forEach(port => {
-                    const cellId = `peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                    const portName = port.name || port.port_id || 'Unknown';
+                    const cellId = `peer-paths-${gateway.id}-${portName.replace(/[^a-zA-Z0-9]/g, '_')}`;
                     const cell = document.getElementById(cellId);
                     if (cell) {
                         cell.innerHTML = '<span class="text-muted">-</span>';
@@ -1824,20 +1956,21 @@
         
         function updatePeerPathCells(gateway, peersByPort) {
             gateway.ports.forEach(port => {
-                const cellId = `peer-paths-${gateway.id}-${port.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                const portName = port.name || port.port_id || 'Unknown';
+                const cellId = `peer-paths-${gateway.id}-${portName.replace(/[^a-zA-Z0-9]/g, '_')}`;
                 const cell = document.getElementById(cellId);
                 
                 if (!cell) return;
                 
                 // Try exact match first, then try to find peers for this port (with or without VLAN tag)
-                let peers = peersByPort[port.name] || [];
+                let peers = peersByPort[portName] || [];
                 
                 // If no exact match, look for peers that start with this port name (e.g., ge-0/0/0.20 starts with ge-0/0/0)
                 if (peers.length === 0) {
                     peers = [];
                     for (const [portId, portPeers] of Object.entries(peersByPort)) {
                         // Check if this peer's port_id starts with our port name (base interface match)
-                        if (portId.startsWith(port.name + '.') || portId === port.name) {
+                        if (portId.startsWith(portName + '.') || portId === portName) {
                             peers.push(...portPeers);
                         }
                     }
@@ -1857,7 +1990,7 @@
                 
                 cell.innerHTML = `
                     <span class="badge ${badgeClass} peer-paths-badge" 
-                          onclick="showPeerPathsModal('${gateway.id}', '${gateway.name}', '${port.name}', '${gateway.site_id}', '${gateway.mac}')"
+                          onclick="showPeerPathsModal('${gateway.id}', '${gateway.name}', '${portName}', '${gateway.site_id}', '${gateway.mac}')"
                           style="cursor: pointer;" 
                           title="Click to view peer path details">
                         <i class="bi ${iconClass}"></i> ${upCount}/${totalCount}
@@ -1866,14 +1999,17 @@
             });
         }
         
-        async function showPeerPathsModal(gatewayId, gatewayName, portName, siteId, mac) {
+        async function showPeerPathsModal(gatewayId, mac, portName, gatewayName) {
             const cacheKey = `${gatewayId}-${mac}`;
-            const peersByPort = vpnPeerCache[cacheKey];
+            const peerData = vpnPeerCache[cacheKey];
             
-            if (!peersByPort) {
+            if (!peerData) {
                 showToast('Peer path data not available', 'danger');
                 return;
             }
+            
+            // Access peers_by_port from the cached data structure
+            const peersByPort = peerData.peers_by_port || peerData || {};
             
             // Try exact match first, then look for peers with VLAN tags on this base interface
             let peers = peersByPort[portName] || [];

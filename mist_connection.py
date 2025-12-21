@@ -8,6 +8,7 @@ The mistapi SDK natively supports:
 - Automatic token rotation on rate limit
 - Token validation (all tokens must have same org privileges)
 """
+import copy
 import logging
 import time
 from typing import List, Dict, Optional
@@ -28,8 +29,9 @@ class MistConnection:
     # Cache TTLs (in seconds)
     SITES_CACHE_TTL = 300  # 5 minutes
     PROFILE_CACHE_TTL = 600  # 10 minutes
+    TEMPLATE_CACHE_TTL = 2678400  # 31 days for Redis persistence
     
-    def __init__(self, api_token: str, org_id: Optional[str] = None, host: str = 'api.mist.com'):
+    def __init__(self, api_token: str, org_id: Optional[str] = None, host: str = 'api.mist.com', redis_cache=None):
         """
         Initialize Mist API connection with support for multiple tokens
         
@@ -59,6 +61,7 @@ class MistConnection:
         self.api_token = api_token  # Store original token string
         self._token_count = token_count  # Store token count
         self._self_data = None  # Cache for /api/v1/self response
+        self._redis_cache = redis_cache  # Optional Redis cache for template persistence
         
         # Temporarily unset MIST_APITOKEN to prevent SDK from auto-loading and
         # validating all tokens (which can fail if rate limited during validation)
@@ -275,31 +278,84 @@ class MistConnection:
             )
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
+                # Store full site data - no filtering to ensure all fields available
                 sites = mistapi.get_all(self.apisession, response)
-                result = [{
-                    'id': site.get('id'),
-                    'name': site.get('name'),
-                    'address': site.get('address', ''),
-                    'timezone': site.get('timezone', 'UTC'),
-                    'num_devices': site.get('num_devices', 0)
-                } for site in sites]
                 
-                # Update cache
-                MistConnection._sites_cache = result
+                # Update cache with full site data
+                MistConnection._sites_cache = sites
                 MistConnection._sites_cache_time = current_time
-                logger.debug(f"Cached {len(result)} sites")
+                logger.debug(f"Cached {len(sites)} sites (full data)")
                 
-                return result
+                return sites
             else:
                 raise Exception(f"API error: {response.status_code}")
         except Exception as e:
             logger.error(f"Error getting sites: {str(e)}")
             raise
 
+    def _get_site_by_id(self, site_id: str) -> Optional[Dict]:
+        """
+        Get site data by ID from cached sites (includes gatewaytemplate_id).
+        Uses the class-level sites cache for efficiency.
+        
+        Args:
+            site_id: Site ID to look up
+            
+        Returns:
+            Site dict with id, name, gatewaytemplate_id, etc. or None if not found
+        """
+        # Get sites from cache (will fetch if needed)
+        sites = self.get_sites()
+        for site in sites:
+            if site.get('id') == site_id:
+                return site
+        return None
+
+    def _get_device_config(self, site_id: str, device_id: str) -> Dict:
+        """
+        Get device configuration (port_config, gatewaytemplate_id, etc.).
+        Uses Redis cache (persistent) with in-memory fallback.
+        
+        Args:
+            site_id: Site ID where device is located
+            device_id: Device ID
+            
+        Returns:
+            Device configuration dictionary
+        """
+        # Check Redis cache first (persistent across restarts)
+        if self._redis_cache:
+            cached = self._redis_cache.get_device_config(device_id)
+            if cached:
+                logger.debug(f"Using Redis cached device config {device_id}")
+                return cached
+        
+        # Fetch from API
+        try:
+            config_response = mistapi.api.v1.sites.devices.getSiteDevice(
+                self.apisession,
+                site_id,
+                device_id
+            )
+            if config_response.status_code == 200:
+                config_data = config_response.data
+                # Store in Redis for persistence
+                if self._redis_cache:
+                    self._redis_cache.set_device_config(device_id, config_data, ttl=self.TEMPLATE_CACHE_TTL)
+                logger.debug(f"Fetched and cached device config {device_id}")
+                return config_data
+            else:
+                logger.warning(f"Could not fetch device config {device_id}: {config_response.status_code}")
+        except Exception as e:
+            logger.warning(f"Error fetching device config {device_id}: {str(e)}")
+        
+        return {}
+
     def _batch_fetch_inventory(self, gateway_macs: set) -> Dict[str, Dict]:
         """
         Batch fetch device inventory data (device profile IDs, site IDs) using org-level inventory.
         This provides profile/template IDs without per-device API calls.
+        Uses Redis cache (persistent) for the full inventory data.
         
         Args:
             gateway_macs: Set of gateway MAC addresses
@@ -307,6 +363,16 @@ class MistConnection:
         Returns:
             Dictionary keyed by MAC with inventory data (deviceprofile_id, site_id, etc.)
         """
+        # Check Redis cache first (persistent across restarts)
+        if self._redis_cache:
+            cached = self._redis_cache.get_inventory()
+            if cached:
+                # Filter to only requested MACs
+                inventory_data = {mac: data for mac, data in cached.items() if mac in gateway_macs}
+                if inventory_data:
+                    logger.debug(f"Using Redis cached inventory for {len(inventory_data)} gateways")
+                    return inventory_data
+        
         inventory_data = {}
         
         try:
@@ -320,21 +386,25 @@ class MistConnection:
             
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
+                # Store FULL inventory data - no filtering
                 results = mistapi.get_all(self.apisession, response)
                 
+                all_inventory = {}
                 for device in results:
                     mac = device.get('mac', '')
-                    if mac not in gateway_macs:
+                    if not mac:
                         continue
                     
-                    # Extract inventory data
-                    inventory_data[mac] = {
-                        'device_id': device.get('id'),
-                        'site_id': device.get('site_id'),
-                        'deviceprofile_id': device.get('deviceprofile_id'),
-                        'name': device.get('name', '')
-                    }
+                    # Store full device data from inventory
+                    all_inventory[mac] = device
                 
+                # Store full inventory in Redis for persistence
+                if self._redis_cache and all_inventory:
+                    self._redis_cache.set_inventory(all_inventory, ttl=self.TEMPLATE_CACHE_TTL)
+                    logger.info(f"Cached full inventory data for {len(all_inventory)} devices")
+                
+                # Filter to only requested MACs for return value
+                inventory_data = {mac: data for mac, data in all_inventory.items() if mac in gateway_macs}
                 logger.debug(f"Batch fetched inventory for {len(inventory_data)} gateways")
             else:
                 logger.warning(f"Org inventory returned {response.status_code}")
@@ -346,7 +416,8 @@ class MistConnection:
 
     def _get_device_profile(self, deviceprofile_id: str) -> Dict:
         """
-        Get device profile configuration (for Hub devices), using class-level cache
+        Get device profile configuration (for Hub devices).
+        Uses Redis cache (persistent) with in-memory fallback.
         
         Args:
             deviceprofile_id: Device profile ID
@@ -354,11 +425,21 @@ class MistConnection:
         Returns:
             Device profile data dictionary
         """
+        # Check in-memory cache first (fastest)
         cache_key = f"profile:{deviceprofile_id}"
         if cache_key in MistConnection._device_profile_cache:
-            logger.debug(f"Using cached device profile {deviceprofile_id}")
+            logger.debug(f"Using in-memory cached device profile {deviceprofile_id}")
             return MistConnection._device_profile_cache[cache_key]
         
+        # Check Redis cache (persistent across restarts)
+        if self._redis_cache:
+            cached = self._redis_cache.get_device_profile(deviceprofile_id)
+            if cached:
+                logger.debug(f"Using Redis cached device profile {deviceprofile_id}")
+                MistConnection._device_profile_cache[cache_key] = cached  # Warm in-memory cache
+                return cached
+        
+        # Fetch from API
         try:
             response = mistapi.api.v1.orgs.deviceprofiles.getOrgDeviceProfile(
                 self.apisession,
@@ -366,9 +447,13 @@ class MistConnection:
                 deviceprofile_id
             )
             if response.status_code == 200:
-                MistConnection._device_profile_cache[cache_key] = response.data
-                logger.debug(f"Fetched and cached device profile {deviceprofile_id}: {response.data.get('name', 'unknown')}")
-                return response.data
+                profile_data = response.data
+                MistConnection._device_profile_cache[cache_key] = profile_data
+                # Store in Redis for persistence
+                if self._redis_cache:
+                    self._redis_cache.set_device_profile(deviceprofile_id, profile_data, ttl=self.TEMPLATE_CACHE_TTL)
+                logger.info(f"Fetched and cached device profile {deviceprofile_id}: {profile_data.get('name', 'unknown')}")
+                return profile_data
             else:
                 logger.warning(f"Could not fetch device profile {deviceprofile_id}: {response.status_code}")
         except Exception as e:
@@ -379,7 +464,8 @@ class MistConnection:
 
     def _get_gateway_template(self, gatewaytemplate_id: str) -> Dict:
         """
-        Get gateway template configuration (for Spoke/Branch devices), using class-level cache
+        Get gateway template configuration (for Spoke/Branch devices).
+        Uses Redis cache (persistent) with in-memory fallback.
         
         Args:
             gatewaytemplate_id: Gateway template ID
@@ -387,11 +473,21 @@ class MistConnection:
         Returns:
             Gateway template data dictionary
         """
+        # Check in-memory cache first (fastest)
         cache_key = f"template:{gatewaytemplate_id}"
         if cache_key in MistConnection._gateway_template_cache:
-            logger.debug(f"Using cached gateway template {gatewaytemplate_id}")
+            logger.debug(f"Using in-memory cached gateway template {gatewaytemplate_id}")
             return MistConnection._gateway_template_cache[cache_key]
         
+        # Check Redis cache (persistent across restarts)
+        if self._redis_cache:
+            cached = self._redis_cache.get_gateway_template(gatewaytemplate_id)
+            if cached:
+                logger.debug(f"Using Redis cached gateway template {gatewaytemplate_id}")
+                MistConnection._gateway_template_cache[cache_key] = cached  # Warm in-memory cache
+                return cached
+        
+        # Fetch from API
         try:
             response = mistapi.api.v1.orgs.gatewaytemplates.getOrgGatewayTemplate(
                 self.apisession,
@@ -399,9 +495,13 @@ class MistConnection:
                 gatewaytemplate_id
             )
             if response.status_code == 200:
-                MistConnection._gateway_template_cache[cache_key] = response.data
-                logger.debug(f"Fetched and cached gateway template {gatewaytemplate_id}: {response.data.get('name', 'unknown')}")
-                return response.data
+                template_data = response.data
+                MistConnection._gateway_template_cache[cache_key] = template_data
+                # Store in Redis for persistence
+                if self._redis_cache:
+                    self._redis_cache.set_gateway_template(gatewaytemplate_id, template_data, ttl=self.TEMPLATE_CACHE_TTL)
+                logger.info(f"Fetched and cached gateway template {gatewaytemplate_id}: {template_data.get('name', 'unknown')}")
+                return template_data
             else:
                 logger.warning(f"Could not fetch gateway template {gatewaytemplate_id}: {response.status_code}")
         except Exception as e:
@@ -433,9 +533,10 @@ class MistConnection:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
             
-            # Get site names mapping (cached)
+            # Get site data mapping (cached) - includes gatewaytemplate_id for Branch devices
             sites = self.get_sites()
             site_map = {s['id']: s['name'] for s in sites}
+            site_data_map = {s['id']: s for s in sites}  # Full site data including gatewaytemplate_id
             
             # Get gateway device stats for basic info (with pagination)
             device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
@@ -459,11 +560,9 @@ class MistConnection:
             # Build a set of gateway MACs for filtering port results
             gateway_macs = {gw.get('mac') for gw in gateways if gw.get('mac')}
             
-            port_params = {'limit': 1000}
-            if start is not None:
-                port_params['start'] = start
-            if end is not None:
-                port_params['end'] = end
+            # Use type=gateway to only fetch gateway ports (not switches)
+            # Use default 1d time range for faster initial load
+            port_params = {'limit': 1000, 'type': 'gateway'}
             
             port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
                 self.apisession,
@@ -530,21 +629,17 @@ class MistConnection:
                 
                 try:
                     # Get device configuration for port_config and gatewaytemplate_id
-                    # This is needed per-device but profile fetches are cached
-                    # SDK handles 429 rate limiting automatically with token rotation
+                    # Uses Redis cache (persistent) to avoid per-device API calls
                     device_config = {}
                     gatewaytemplate_id = None
                     if gw_site_id and gw_id:
-                        config_response = mistapi.api.v1.sites.devices.getSiteDevice(
-                            self.apisession,
-                            gw_site_id,
-                            gw_id
-                        )
-                        if config_response.status_code == 200:
-                            device_config = config_response.data
-                            # Use device config's gatewaytemplate_id if not a Hub device
-                            if not deviceprofile_id:
-                                gatewaytemplate_id = device_config.get('gatewaytemplate_id')
+                        device_config = self._get_device_config(gw_site_id, gw_id)
+                        # Use device config's gatewaytemplate_id if not a Hub device
+                        if not deviceprofile_id:
+                            gatewaytemplate_id = device_config.get('gatewaytemplate_id')
+                            # For Branch devices, gatewaytemplate_id is on the site object (not device config)
+                            if not gatewaytemplate_id and gw_site_id in site_data_map:
+                                gatewaytemplate_id = site_data_map[gw_site_id].get('gatewaytemplate_id')
                     
                     # Start with device profile OR gateway template port_config
                     # Hub devices use deviceprofile_id, Branch/Spoke devices use gatewaytemplate_id
@@ -553,13 +648,17 @@ class MistConnection:
                         # Hub device - get config from device profile (class-level cache)
                         profile_data = self._get_device_profile(deviceprofile_id)
                         if profile_data and 'port_config' in profile_data:
-                            merged_port_config = dict(profile_data.get('port_config', {}))
+                            # IMPORTANT: Use deepcopy to avoid mutating the cached template data
+                            # when device-level overrides are merged below
+                            merged_port_config = copy.deepcopy(profile_data.get('port_config', {}))
                             logger.debug(f"Gateway {gw_id} (Hub) using device profile {deviceprofile_id} with {len(merged_port_config)} ports")
                     elif gatewaytemplate_id:
                         # Branch/Spoke device - get config from gateway template (class-level cache)
                         template_data = self._get_gateway_template(gatewaytemplate_id)
                         if template_data and 'port_config' in template_data:
-                            merged_port_config = dict(template_data.get('port_config', {}))
+                            # IMPORTANT: Use deepcopy to avoid mutating the cached template data
+                            # when device-level overrides are merged below
+                            merged_port_config = copy.deepcopy(template_data.get('port_config', {}))
                             logger.debug(f"Gateway {gw_id} (Branch) using gateway template {gatewaytemplate_id} with {len(merged_port_config)} ports")
                     
                     # Merge device-level port_config (overrides profile settings)
@@ -582,8 +681,8 @@ class MistConnection:
                             description = port_cfg.get('description', '').strip()
                             vlan_id = port_cfg.get('vlan_id', '')
                             
-                            # Port is overridden if it exists in device-level config
-                            is_overridden = port_name in overridden_ports
+                            # Get template type from ip_config (this is what the template says)
+                            template_ip_type = ip_cfg.get('type', 'dhcp')
                             
                             wan_port_config_by_name[port_name] = {
                                 'name': port_cfg.get('name', ''),
@@ -591,9 +690,8 @@ class MistConnection:
                                 'ip': ip_cfg.get('ip', ''),
                                 'netmask': ip_cfg.get('netmask', ''),
                                 'gateway': ip_cfg.get('gateway', ''),
-                                'type': ip_cfg.get('type', 'dhcp'),
+                                'template_type': template_ip_type,  # Store as template_type for clarity
                                 'vlan_id': str(vlan_id) if vlan_id else '',
-                                'override': 'yes' if is_overridden else 'no',
                                 'disabled': port_cfg.get('disabled', False)
                             }
                     
@@ -610,6 +708,16 @@ class MistConnection:
                         
                         if device_search_response.status_code == 200:
                             search_results = device_search_response.data.get('results', [])
+                            
+                            # Store raw API response for debugging
+                            if self._redis_cache and search_results:
+                                self._redis_cache.set_raw_api_response(
+                                    'searchSiteDevices', 
+                                    f"{gw_id}-{gw_mac}", 
+                                    device_search_response.data,
+                                    ttl=self.TEMPLATE_CACHE_TTL
+                                )
+                            
                             if search_results and 'if_stat' in search_results[0]:
                                 if_stat = search_results[0]['if_stat']
                                 
@@ -617,8 +725,12 @@ class MistConnection:
                                     if if_data.get('port_usage') == 'wan':
                                         port_id = if_data.get('port_id', '')
                                         ips = if_data.get('ips', [])
+                                        address_mode = if_data.get('address_mode', '')
                                         
-                                        # Parse IP/CIDR notation (e.g., "192.168.20.2/24")
+                                        # Store FULL if_data for this port (all fields from API)
+                                        runtime_entry = dict(if_data)  # Copy all fields
+                                        
+                                        # Also parse IP/CIDR for convenience
                                         if ips and len(ips) > 0 and '/' in ips[0]:
                                             ip_cidr = ips[0]
                                             ip, cidr = ip_cidr.split('/')
@@ -628,11 +740,14 @@ class MistConnection:
                                             mask = (0xffffffff >> (32 - cidr_int)) << (32 - cidr_int)
                                             netmask = f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
                                             
-                                            runtime_ips_by_port[port_id] = {
-                                                'ip': ip,
-                                                'netmask': netmask,
-                                                'address_mode': if_data.get('address_mode', 'Unknown')
-                                            }
+                                            runtime_entry['ip'] = ip
+                                            runtime_entry['netmask'] = netmask
+                                        else:
+                                            runtime_entry['ip'] = ''
+                                            runtime_entry['netmask'] = ''
+                                        
+                                        # Always store runtime data for WAN ports
+                                        runtime_ips_by_port[port_id] = runtime_entry
                 except Exception as e:
                     logger.warning(f"Could not process config for gateway {gw_id}: {str(e)}")
                 
@@ -668,17 +783,30 @@ class MistConnection:
                             'ip': '',
                             'netmask': '',
                             'gateway': '',
-                            'type': 'dhcp',  # Default to DHCP for unconfigured ports
+                            'template_type': 'dhcp',  # Default to DHCP for unconfigured ports
                             'vlan_id': '',
-                            'override': 'no',
                             'disabled': False
                         }
                     
-                    # Get actual runtime IP (prioritize runtime IP for DHCP ports)
+                    # Get runtime data
                     runtime_ip_data = runtime_ips_by_port.get(port_id, {})
                     
-                    # Use runtime IP if available (for DHCP ports)
-                    if runtime_ip_data and port_config.get('type') == 'dhcp':
+                    # Get template type (what the template says this port should be)
+                    template_type = port_config.get('template_type', 'dhcp')
+                    
+                    # Get runtime type from API address_mode
+                    # API returns: 'Dynamic' or 'Static' (capitalized)
+                    # We normalize to: 'dhcp' or 'static' (lowercase)
+                    raw_address_mode = runtime_ip_data.get('address_mode', '') if runtime_ip_data else ''
+                    address_mode_map = {'dynamic': 'dhcp', 'static': 'static'}
+                    runtime_type = address_mode_map.get(raw_address_mode.lower(), template_type)
+                    
+                    # SIMPLE OVERRIDE DETECTION:
+                    # If runtime type != template type, it's an override
+                    is_overridden = (runtime_type != template_type)
+                    
+                    # Get IP address (from runtime for DHCP, from config for static)
+                    if runtime_ip_data and runtime_ip_data.get('ip'):
                         ip_addr = runtime_ip_data.get('ip', '')
                         netmask_str = runtime_ip_data.get('netmask', '')
                         # Convert dotted-decimal netmask to CIDR
@@ -689,7 +817,7 @@ class MistConnection:
                         else:
                             netmask = netmask_str
                     else:
-                        # Use configured static IP
+                        # Fallback to configured IP (template or device)
                         ip_addr = port_config.get('ip', '').strip()
                         netmask = port_config.get('netmask', '').strip()
                         
@@ -702,20 +830,21 @@ class MistConnection:
                     rx_bytes = port.get('rx_bytes', 0)
                     tx_bytes = port.get('tx_bytes', 0)
                     
-                    port_configs.append({
+                    # Build port object
+                    port_obj = {
                         'name': port_id,
-                        'wan_name': port_config.get('name', ''),  # WAN name from config (e.g., 'BB-Hub-1')
+                        'port_id': port_id,
+                        'wan_name': port_config.get('name', ''),
                         'description': port_config.get('description', port.get('port_desc', '')),
                         'enabled': port.get('up', False) and not port_config.get('disabled', False),
                         'usage': 'wan',
-                        # IP Configuration (runtime for DHCP, configured for static)
                         'ip': ip_addr,
                         'netmask': netmask,
                         'gateway': port_config.get('gateway', ''),
-                        'type': port_config.get('type', 'unknown'),
+                        'type': runtime_type,  # What it's actually running as
+                        'template_type': template_type,  # What the template says
                         'vlan_id': port_config.get('vlan_id', ''),
-                        'override': port_config.get('override', 'no'),
-                        # Statistics from org-level port search
+                        'override': 'yes' if is_overridden else 'no',
                         'up': port.get('up', False),
                         'rx_bytes': rx_bytes,
                         'tx_bytes': tx_bytes,
@@ -725,7 +854,15 @@ class MistConnection:
                         'tx_errors': port.get('tx_errors', 0),
                         'speed': port.get('speed', 0),
                         'mac': port.get('port_mac', '')
-                    })
+                    }
+                    
+                    # Merge ALL runtime data from searchSiteDevices if_stat (full API response)
+                    if runtime_ip_data:
+                        for key, value in runtime_ip_data.items():
+                            if key not in port_obj:  # Don't overwrite our computed fields
+                                port_obj[key] = value
+                    
+                    port_configs.append(port_obj)
                 
                 # Add WAN ports from config that don't have stats yet
                 # These are configured WAN ports that may be down or not reporting stats
@@ -750,9 +887,20 @@ class MistConnection:
                     if cfg_port_name in ports_with_stats or base_port_name in ports_with_stats:
                         continue
                     
-                    # Get runtime IP if available
+                    # Get template type and runtime data
+                    template_type = cfg.get('template_type', 'dhcp')
                     runtime_ip_data = runtime_ips_by_port.get(base_port_name, {})
-                    if runtime_ip_data and cfg.get('type') == 'dhcp':
+                    
+                    # Get runtime type from address_mode
+                    raw_address_mode = runtime_ip_data.get('address_mode', '') if runtime_ip_data else ''
+                    address_mode_map = {'dynamic': 'dhcp', 'static': 'static'}
+                    runtime_type = address_mode_map.get(raw_address_mode.lower(), template_type)
+                    
+                    # Override = template type != runtime type
+                    is_overridden = (runtime_type != template_type)
+                    
+                    # Get IP address
+                    if runtime_ip_data and runtime_ip_data.get('ip'):
                         ip_addr = runtime_ip_data.get('ip', '')
                         netmask_str = runtime_ip_data.get('netmask', '')
                         if netmask_str and '.' in netmask_str:
@@ -781,10 +929,11 @@ class MistConnection:
                         'ip': ip_addr,
                         'netmask': netmask,
                         'gateway': cfg.get('gateway', ''),
-                        'type': cfg.get('type', 'unknown'),
+                        'type': runtime_type,
+                        'template_type': template_type,
                         'vlan_id': cfg.get('vlan_id', ''),
-                        'override': cfg.get('override', 'no'),
-                        'up': physical_up,  # Physical status from org port stats
+                        'override': 'yes' if is_overridden else 'no',
+                        'up': physical_up,
                         'rx_bytes': port_stats.get('rx_bytes', 0),
                         'tx_bytes': port_stats.get('tx_bytes', 0),
                         'rx_pkts': port_stats.get('rx_pkts', 0),
@@ -965,3 +1114,557 @@ class MistConnection:
                 'peers_by_port': {},
                 'total_peers': 0
             }
+
+    def _get_port_insights(self, site_id: str, gateway_id: str, port_id: str, 
+                           start: int, end: int, interval: int = 3600) -> Optional[Dict]:
+        """
+        Fetch traffic insights for a specific gateway port.
+        
+        Uses direct HTTP request as SDK doesn't support this endpoint.
+        
+        Args:
+            site_id: Site ID
+            gateway_id: Gateway device ID
+            port_id: Port identifier (e.g., 'ge-0/0/0')
+            start: Start timestamp (Unix epoch)
+            end: End timestamp (Unix epoch)
+            interval: Sample interval in seconds (default 3600 = 1 hour)
+            
+        Returns:
+            Dict with timestamps, rx_bps, tx_bps, rx_bytes, tx_bytes or None on error
+        """
+        import requests
+        
+        try:
+            # Get current token
+            current_token = self.api_token.split(',')[0].strip()
+            try:
+                tokens = getattr(self.apisession, '_apitoken', None)
+                token_idx = getattr(self.apisession, '_apitoken_index', 0)
+                if tokens and len(tokens) > token_idx >= 0:
+                    current_token = tokens[token_idx]
+            except Exception:
+                pass
+            
+            headers = {
+                'Authorization': f'Token {current_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            url = f'https://{self.host}/api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats'
+            params = {
+                'interval': interval,
+                'start': start,
+                'end': end,
+                'port_id': port_id,
+                'metrics': 'rx_bps,tx_bps'
+            }
+            
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                rx_bps_list = data.get('rx_bps', [])
+                tx_bps_list = data.get('tx_bps', [])
+                
+                # Calculate total bytes transferred
+                rx_bytes = sum(bps * interval for bps in rx_bps_list if bps) // 8
+                tx_bytes = sum(bps * interval for bps in tx_bps_list if bps) // 8
+                
+                return {
+                    'timestamps': data.get('timestamps', []),
+                    'rx_bps': rx_bps_list,
+                    'tx_bps': tx_bps_list,
+                    'rx_bytes': rx_bytes,
+                    'tx_bytes': tx_bytes
+                }
+            elif response.status_code == 429:
+                logger.warning(f"Rate limited on insights for {gateway_id}/{port_id}")
+                return None
+            else:
+                logger.debug(f"Insights API returned {response.status_code} for {gateway_id}/{port_id}")
+                return None
+                
+        except requests.exceptions.Timeout:
+            logger.warning(f"Timeout fetching insights for {gateway_id}/{port_id}")
+            return None
+        except Exception as e:
+            logger.warning(f"Error fetching insights for {gateway_id}/{port_id}: {e}")
+            return None
+
+    def get_gateway_device_list(self) -> List[Dict]:
+        """
+        Get basic gateway device list without port stats (FAST for large orgs).
+        
+        This returns just the device info without fetching port statistics,
+        which can take hours for large organizations.
+        
+        Returns:
+            List of gateway devices with basic info (id, mac, name, site_id, status)
+        """
+        try:
+            if not self.org_id:
+                raise ValueError("Organization ID is required")
+            
+            # Get site names mapping (cached)
+            sites = self.get_sites()
+            site_map = {s['id']: s['name'] for s in sites}
+            
+            # Get gateway device stats for basic info (with pagination)
+            device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
+                self.apisession,
+                self.org_id,
+                type='gateway',
+                limit=1000
+            )
+            
+            if device_response.status_code != 200:
+                raise Exception(f"API error getting device stats: {device_response.status_code}")
+            
+            # Use get_all to handle pagination automatically
+            gateways = mistapi.get_all(self.apisession, device_response)
+            
+            # Store full gateway data - add site_name and enrichment flags but keep all API fields
+            for gw in gateways:
+                gw_site_id = gw.get('site_id')
+                gw['site_name'] = site_map.get(gw_site_id, '')
+                if 'ports' not in gw:
+                    gw['ports'] = []  # Will be populated later
+                gw['_basic_only'] = True  # Flag indicating port data not yet loaded
+            
+            logger.info(f"Retrieved full data for {len(gateways)} gateways")
+            return gateways
+            
+        except Exception as e:
+            logger.error(f"Error getting gateway device list: {str(e)}")
+            raise
+
+
+    def get_port_stats_batch(self, callback=None, batch_size: int = 1000) -> Dict[str, List[Dict]]:
+        """
+        Get port statistics in batches with progress callback.
+        
+        Args:
+            callback: Optional function to call with progress (current, total, ports_batch)
+            batch_size: Number of ports per batch (default 1000)
+            
+        Returns:
+            Dict mapping device MAC to list of port stats
+        """
+        try:
+            if not self.org_id:
+                raise ValueError("Organization ID is required")
+            
+            ports_by_device = {}
+            total_ports = 0
+            
+            # Use type=gateway to only fetch gateway ports
+            port_params = {'limit': batch_size, 'type': 'gateway'}
+            
+            port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
+                self.apisession,
+                self.org_id,
+                **port_params
+            )
+            
+            if port_response.status_code != 200:
+                raise Exception(f"API error getting port stats: {port_response.status_code}")
+            
+            # Manual pagination to allow callbacks
+            while True:
+                if port_response.status_code != 200:
+                    break
+                    
+                ports = port_response.data.get('results', [])
+                if not ports:
+                    break
+                
+                # Process this batch
+                for port in ports:
+                    device_mac = port.get('mac')
+                    if device_mac:
+                        if device_mac not in ports_by_device:
+                            ports_by_device[device_mac] = []
+                        ports_by_device[device_mac].append(port)
+                        total_ports += 1
+                
+                # Call progress callback
+                if callback:
+                    callback(total_ports, None, ports)
+                
+                # Check for next page
+                next_page = port_response.data.get('next')
+                if not next_page:
+                    break
+                
+                # Fetch next page
+                search_after = port_response.data.get('search_after')
+                if search_after:
+                    port_params['search_after'] = search_after
+                    port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
+                        self.apisession,
+                        self.org_id,
+                        **port_params
+                    )
+                else:
+                    break
+            
+            logger.info(f"Retrieved {total_ports} port stats for {len(ports_by_device)} devices")
+            return ports_by_device
+            
+        except Exception as e:
+            logger.error(f"Error getting port stats batch: {str(e)}")
+            raise
+
+
+    def get_port_stats_paginated(self, callback=None) -> Dict[str, List[Dict]]:
+        """
+        Get ALL port statistics with proper pagination using mistapi.get_all.
+        
+        Args:
+            callback: Optional function to call with progress (ports_count, devices_count)
+            
+        Returns:
+            Dict mapping device MAC to list of port stats
+        """
+        try:
+            if not self.org_id:
+                raise ValueError("Organization ID is required")
+            
+            ports_by_device = {}
+            
+            # Use type=gateway to only fetch gateway ports
+            port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
+                self.apisession,
+                self.org_id,
+                type='gateway',
+                limit=1000
+            )
+            
+            if port_response.status_code != 200:
+                raise Exception(f"API error getting port stats: {port_response.status_code}")
+            
+            # Use mistapi.get_all to handle pagination automatically
+            all_ports = mistapi.get_all(self.apisession, port_response)
+            
+            # Group ports by device MAC
+            for port in all_ports:
+                device_mac = port.get('mac')
+                if device_mac:
+                    if device_mac not in ports_by_device:
+                        ports_by_device[device_mac] = []
+                    ports_by_device[device_mac].append(port)
+            
+            total_ports = len(all_ports)
+            logger.info(f"Retrieved {total_ports} port stats for {len(ports_by_device)} devices")
+            
+            if callback:
+                callback(total_ports, len(ports_by_device))
+            
+            return ports_by_device
+            
+        except Exception as e:
+            logger.error(f"Error getting port stats: {str(e)}")
+            raise
+
+    def get_site_port_stats(self, site_id: str) -> List[Dict]:
+        """
+        Get port statistics for a single site using site-level API.
+        
+        This is faster than org-level search when processing sites incrementally,
+        as it only queries ports for one site at a time.
+        
+        Args:
+            site_id: Site ID to fetch port stats for
+            
+        Returns:
+            List of port stats for gateways at this site
+        """
+        try:
+            if not site_id:
+                raise ValueError("Site ID is required")
+            
+            # Use site-level API with device_type=gateway
+            port_response = mistapi.api.v1.sites.stats.searchSiteSwOrGwPorts(
+                self.apisession,
+                site_id,
+                device_type='gateway',
+                limit=1000
+            )
+            
+            if port_response.status_code != 200:
+                logger.warning(f"API error getting port stats for site {site_id}: {port_response.status_code}")
+                return []
+            
+            # Use mistapi.get_all to handle pagination automatically
+            all_ports = mistapi.get_all(self.apisession, port_response)
+            
+            logger.debug(f"Retrieved {len(all_ports)} ports for site {site_id}")
+            return all_ports
+            
+        except Exception as e:
+            logger.error(f"Error getting site port stats for {site_id}: {str(e)}")
+            return []
+
+    def enrich_gateway_ports(self, gateway: Dict, wan_ports: List[Dict], inventory_map: Dict) -> List[Dict]:
+        """
+        Enrich raw WAN port stats with device config data (WAN name, IP, gateway, type, override).
+        
+        This fetches device/profile config and merges it with raw port stats to get
+        the full port details like WAN name, static IP, gateway IP, config type, override status.
+        
+        Args:
+            gateway: Gateway dict with id, site_id, mac
+            wan_ports: List of raw WAN port stats from searchSiteSwOrGwPorts
+            inventory_map: Dict of MAC -> inventory data (deviceprofile_id, etc.)
+            
+        Returns:
+            List of enriched port dicts with all config fields
+        """
+        gw_id = gateway.get('id')
+        gw_site_id = gateway.get('site_id')
+        gw_mac = gateway.get('mac')
+        
+        if not gw_id or not gw_site_id:
+            # Return minimally enriched ports if we can't get full config
+            return self._minimal_port_enrichment(wan_ports)
+        
+        port_configs = []
+        wan_port_config_by_name = {}
+        runtime_ips_by_port = {}
+        
+        try:
+            # Get profile ID from inventory map
+            inventory_data = inventory_map.get(gw_mac, {})
+            deviceprofile_id = inventory_data.get('deviceprofile_id')
+            
+            # Get device configuration for port_config and gatewaytemplate_id
+            # Uses Redis cache (persistent) to avoid per-device API calls
+            device_config = self._get_device_config(gw_site_id, gw_id)
+            gatewaytemplate_id = None
+            
+            if not deviceprofile_id:
+                gatewaytemplate_id = device_config.get('gatewaytemplate_id')
+                # For Branch devices, gatewaytemplate_id is on the site object (not device config)
+                if not gatewaytemplate_id:
+                    site_data = self._get_site_by_id(gw_site_id)
+                    if site_data:
+                        gatewaytemplate_id = site_data.get('gatewaytemplate_id')
+            
+            # Start with device profile OR gateway template port_config
+            merged_port_config = {}
+            if deviceprofile_id:
+                profile_data = self._get_device_profile(deviceprofile_id)
+                if profile_data and 'port_config' in profile_data:
+                    # IMPORTANT: Use deepcopy to avoid mutating the cached template data
+                    # when device-level overrides are merged below
+                    merged_port_config = copy.deepcopy(profile_data.get('port_config', {}))
+            elif gatewaytemplate_id:
+                template_data = self._get_gateway_template(gatewaytemplate_id)
+                if template_data and 'port_config' in template_data:
+                    # IMPORTANT: Use deepcopy to avoid mutating the cached template data
+                    # when device-level overrides are merged below
+                    merged_port_config = copy.deepcopy(template_data.get('port_config', {}))
+            
+            # Merge device-level port_config (overrides profile settings)
+            device_port_config = device_config.get('port_config', {})
+            overridden_ports = set()
+            if device_port_config:
+                for port_name, port_cfg in device_port_config.items():
+                    overridden_ports.add(port_name)
+                    if port_name in merged_port_config:
+                        merged_port_config[port_name].update(port_cfg)
+                    else:
+                        merged_port_config[port_name] = port_cfg
+            
+            # Extract WAN port configurations keyed by port name
+            for port_name, port_cfg in merged_port_config.items():
+                if port_cfg.get('usage') == 'wan':
+                    ip_cfg = port_cfg.get('ip_config', {})
+                    template_ip_type = ip_cfg.get('type', 'dhcp')
+                    
+                    wan_port_config_by_name[port_name] = {
+                        'name': port_cfg.get('name', ''),
+                        'description': port_cfg.get('description', '').strip(),
+                        'ip': ip_cfg.get('ip', ''),
+                        'netmask': ip_cfg.get('netmask', ''),
+                        'gateway': ip_cfg.get('gateway', ''),
+                        'template_type': template_ip_type,
+                        'vlan_id': str(port_cfg.get('vlan_id', '')) if port_cfg.get('vlan_id') else '',
+                        'disabled': port_cfg.get('disabled', False)
+                    }
+            
+            # Get runtime IPs from searchSiteDevices (needed for DHCP IP addresses)
+            device_search_response = mistapi.api.v1.sites.devices.searchSiteDevices(
+                self.apisession,
+                gw_site_id,
+                type='gateway',
+                mac=gw_mac,
+                stats=True
+            )
+            
+            if device_search_response.status_code == 200:
+                search_results = device_search_response.data.get('results', [])
+                
+                # Store raw API response for debugging
+                if self._redis_cache and search_results:
+                    self._redis_cache.set_raw_api_response(
+                        'searchSiteDevices_enrich', 
+                        f"{gw_id}-{gw_mac}", 
+                        device_search_response.data,
+                        ttl=self.TEMPLATE_CACHE_TTL
+                    )
+                
+                if search_results and 'if_stat' in search_results[0]:
+                    if_stat = search_results[0]['if_stat']
+                    
+                    for if_name, if_data in if_stat.items():
+                        if if_data.get('port_usage') == 'wan':
+                            port_id = if_data.get('port_id', '')
+                            ips = if_data.get('ips', [])
+                            
+                            # Store FULL if_data for this port (all fields from API)
+                            runtime_entry = dict(if_data)  # Copy all fields
+                            
+                            # Also parse IP/CIDR for convenience
+                            if ips and len(ips) > 0 and '/' in ips[0]:
+                                ip_cidr = ips[0]
+                                ip, cidr = ip_cidr.split('/')
+                                cidr_int = int(cidr)
+                                mask = (0xffffffff >> (32 - cidr_int)) << (32 - cidr_int)
+                                netmask = f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
+                                
+                                runtime_entry['ip'] = ip
+                                runtime_entry['netmask'] = netmask
+                            else:
+                                runtime_entry['ip'] = ''
+                                runtime_entry['netmask'] = ''
+                            
+                            # Always store runtime data for WAN ports
+                            runtime_ips_by_port[port_id] = runtime_entry
+                                
+        except Exception as e:
+            logger.warning(f"Could not get config for gateway {gw_id}: {str(e)}")
+            return self._minimal_port_enrichment(wan_ports)
+        
+        # Combine WAN port stats with IP configuration
+        for port in wan_ports:
+            port_id = port.get('port_id', '')
+            port_desc = port.get('port_desc', '').strip()
+            
+            # Match by port_id (exact match first)
+            port_config = wan_port_config_by_name.get(port_id, {})
+            
+            # If no exact match, try VLAN-tagged config for base interface
+            if not port_config:
+                for cfg_name, cfg in wan_port_config_by_name.items():
+                    if cfg_name.startswith(port_id + '.'):
+                        port_config = cfg
+                        break
+            
+            # If still no match, try by description
+            if not port_config and port_desc:
+                for cfg_name, cfg in wan_port_config_by_name.items():
+                    if cfg.get('description') == port_desc:
+                        port_config = cfg
+                        break
+            
+            # Get runtime data
+            runtime_ip_data = runtime_ips_by_port.get(port_id, {})
+            
+            # Get template type (what the template says this port should be)
+            template_type = port_config.get('template_type', 'dhcp') if port_config else 'dhcp'
+            
+            # Get runtime type from API address_mode
+            # API returns: 'Dynamic' or 'Static' (capitalized)
+            # We normalize to: 'dhcp' or 'static' (lowercase)
+            raw_address_mode = runtime_ip_data.get('address_mode', '') if runtime_ip_data else ''
+            address_mode_map = {'dynamic': 'dhcp', 'static': 'static'}
+            runtime_type = address_mode_map.get(raw_address_mode.lower(), template_type)
+            
+            # SIMPLE OVERRIDE DETECTION:
+            # If runtime type != template type, it's an override
+            is_overridden = (runtime_type != template_type)
+            
+            # Get IP address
+            if runtime_ip_data and runtime_ip_data.get('ip'):
+                ip_addr = runtime_ip_data.get('ip', '')
+                netmask_str = runtime_ip_data.get('netmask', '')
+                if netmask_str and '.' in netmask_str:
+                    parts = netmask_str.split('.')
+                    binary = ''.join([bin(int(x)+256)[3:] for x in parts])
+                    netmask = str(binary.count('1'))
+                else:
+                    netmask = netmask_str
+            else:
+                ip_addr = port_config.get('ip', '').strip() if port_config else ''
+                netmask = port_config.get('netmask', '').strip() if port_config else ''
+                if netmask.startswith('/'):
+                    netmask = netmask[1:]
+            
+            # Build port object
+            port_obj = {
+                'name': port_id,
+                'port_id': port_id,
+                'wan_name': port_config.get('name', '') if port_config else '',
+                'description': port_config.get('description', port_desc) if port_config else port_desc,
+                'enabled': port.get('up', False) and not (port_config.get('disabled', False) if port_config else False),
+                'usage': 'wan',
+                'ip': ip_addr,
+                'netmask': netmask,
+                'gateway': port_config.get('gateway', '') if port_config else '',
+                'type': runtime_type,  # What it's actually running as
+                'template_type': template_type,  # What the template says
+                'vlan_id': port_config.get('vlan_id', '') if port_config else '',
+                'override': 'yes' if is_overridden else 'no',
+                'up': port.get('up', False),
+                'rx_bytes': port.get('rx_bytes', 0),
+                'tx_bytes': port.get('tx_bytes', 0),
+                'rx_pkts': port.get('rx_pkts', 0),
+                'tx_pkts': port.get('tx_pkts', 0),
+                'speed': port.get('speed', 0),
+                'mac': port.get('port_mac', '')
+            }
+            
+            # Merge ALL runtime data from searchSiteDevices if_stat (full API response)
+            if runtime_ip_data:
+                for key, value in runtime_ip_data.items():
+                    if key not in port_obj:  # Don't overwrite our computed fields
+                        port_obj[key] = value
+            
+            port_configs.append(port_obj)
+        
+        # Sort ports by name
+        port_configs.sort(key=lambda p: p.get('name', ''))
+        return port_configs
+    
+    def _minimal_port_enrichment(self, wan_ports: List[Dict]) -> List[Dict]:
+        """
+        Minimal enrichment when we can't get full config data.
+        Maps raw API fields to frontend-expected fields.
+        """
+        enriched = []
+        for port in wan_ports:
+            port_id = port.get('port_id', '')
+            enriched.append({
+                'name': port_id,
+                'port_id': port_id,
+                'wan_name': '',
+                'description': port.get('port_desc', ''),
+                'enabled': port.get('up', False),
+                'usage': 'wan',
+                'ip': '',
+                'netmask': '',
+                'gateway': '',
+                'type': 'unknown',
+                'vlan_id': '',
+                'override': '',
+                'up': port.get('up', False),
+                'rx_bytes': port.get('rx_bytes', 0),
+                'tx_bytes': port.get('tx_bytes', 0),
+                'rx_pkts': port.get('rx_pkts', 0),
+                'tx_pkts': port.get('tx_pkts', 0),
+                'speed': port.get('speed', 0),
+                'mac': port.get('port_mac', '')
+            })
+        return enriched

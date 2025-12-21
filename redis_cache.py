@@ -106,6 +106,156 @@ class RedisCache:
             logger.error(f"Error retrieving sites data: {e}")
             return None
     
+    # ==================== Device Profiles (Hub Templates) ====================
+    
+    def set_device_profile(self, profile_id: str, profile_data: dict[str, Any], ttl: Optional[int] = None) -> bool:
+        """Store a device profile (Hub template)"""
+        try:
+            key = f"mist:profiles:{profile_id}"
+            self.client.setex(
+                key,
+                ttl or self.DEFAULT_TTL,
+                self._serialize(profile_data)
+            )
+            logger.debug(f"Cached device profile {profile_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error storing device profile {profile_id}: {e}")
+            return False
+    
+    def get_device_profile(self, profile_id: str) -> Optional[dict[str, Any]]:
+        """Retrieve a device profile (Hub template)"""
+        try:
+            key = f"mist:profiles:{profile_id}"
+            data = self.client.get(key)
+            return self._deserialize(data)
+        except Exception as e:
+            logger.error(f"Error retrieving device profile {profile_id}: {e}")
+            return None
+    
+    # ==================== Gateway Templates (Edge/Branch Templates) ====================
+    
+    def set_gateway_template(self, template_id: str, template_data: dict[str, Any], ttl: Optional[int] = None) -> bool:
+        """Store a gateway template (Edge/Branch template)"""
+        try:
+            key = f"mist:templates:{template_id}"
+            self.client.setex(
+                key,
+                ttl or self.DEFAULT_TTL,
+                self._serialize(template_data)
+            )
+            logger.debug(f"Cached gateway template {template_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error storing gateway template {template_id}: {e}")
+            return False
+    
+    def get_gateway_template(self, template_id: str) -> Optional[dict[str, Any]]:
+        """Retrieve a gateway template (Edge/Branch template)"""
+        try:
+            key = f"mist:templates:{template_id}"
+            data = self.client.get(key)
+            return self._deserialize(data)
+        except Exception as e:
+            logger.error(f"Error retrieving gateway template {template_id}: {e}")
+            return None
+    
+    def get_all_gateway_templates(self) -> dict[str, dict[str, Any]]:
+        """Retrieve all gateway templates"""
+        try:
+            templates = {}
+            keys = self.client.keys("mist:templates:*")
+            for key in keys:
+                template_id = key.decode().replace("mist:templates:", "")
+                data = self.client.get(key)
+                if data:
+                    templates[template_id] = self._deserialize(data)
+            return templates
+        except Exception as e:
+            logger.error(f"Error retrieving all gateway templates: {e}")
+            return {}
+    
+    # ==================== Device Configs (per-gateway configuration) ====================
+    
+    def set_device_config(self, device_id: str, config_data: dict[str, Any], ttl: Optional[int] = None) -> bool:
+        """Store a device configuration (full gateway config with port_config)"""
+        try:
+            key = f"mist:device_config:{device_id}"
+            self.client.setex(
+                key,
+                ttl or self.DEFAULT_TTL,
+                self._serialize(config_data)
+            )
+            logger.debug(f"Cached device config {device_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error storing device config {device_id}: {e}")
+            return False
+    
+    def get_device_config(self, device_id: str) -> Optional[dict[str, Any]]:
+        """Retrieve a device configuration"""
+        try:
+            key = f"mist:device_config:{device_id}"
+            data = self.client.get(key)
+            return self._deserialize(data)
+        except Exception as e:
+            logger.error(f"Error retrieving device config {device_id}: {e}")
+            return None
+    
+    # ==================== Inventory Data (device profile IDs, site IDs) ====================
+    
+    def set_inventory(self, inventory_data: dict[str, dict[str, Any]], ttl: Optional[int] = None) -> bool:
+        """Store inventory data (MAC -> device info including deviceprofile_id)"""
+        try:
+            key = "mist:inventory"
+            self.client.setex(
+                key,
+                ttl or self.DEFAULT_TTL,
+                self._serialize(inventory_data)
+            )
+            logger.info(f"Cached inventory data for {len(inventory_data)} devices")
+            return True
+        except Exception as e:
+            logger.error(f"Error storing inventory data: {e}")
+            return False
+    
+    def get_inventory(self) -> Optional[dict[str, dict[str, Any]]]:
+        """Retrieve inventory data"""
+        try:
+            key = "mist:inventory"
+            data = self.client.get(key)
+            return self._deserialize(data)
+        except Exception as e:
+            logger.error(f"Error retrieving inventory data: {e}")
+            return None
+    
+    # ==================== Raw API Responses (for debugging) ====================
+    
+    def set_raw_api_response(self, endpoint_name: str, device_id: str, response_data: dict[str, Any], ttl: Optional[int] = None) -> bool:
+        """Store raw API response for debugging/analysis"""
+        try:
+            key = f"mist:raw:{endpoint_name}:{device_id}"
+            self.client.setex(
+                key,
+                ttl or self.DEFAULT_TTL,
+                self._serialize(response_data)
+            )
+            logger.debug(f"Cached raw API response {endpoint_name} for {device_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error storing raw API response: {e}")
+            return False
+    
+    def get_raw_api_response(self, endpoint_name: str, device_id: str) -> Optional[dict[str, Any]]:
+        """Retrieve raw API response"""
+        try:
+            key = f"mist:raw:{endpoint_name}:{device_id}"
+            data = self.client.get(key)
+            return self._deserialize(data)
+        except Exception as e:
+            logger.error(f"Error retrieving raw API response: {e}")
+            return None
+    
     # ==================== Gateway Data ====================
     
     def set_gateways(self, gateways: list[dict[str, Any]], ttl: Optional[int] = None) -> bool:
@@ -150,7 +300,7 @@ class RedisCache:
     def get_vpn_peers(self, gateway_id: str, mac: str) -> Optional[dict[str, Any]]:
         """Retrieve VPN peer paths for a gateway"""
         try:
-            key = f"{self.PREFIX_VPN_PEERS}:{gateway_id}:{mac}"
+            key = f"{self.PREFIX_VPN_PEERS}:{gateway_id}-{mac}"
             data = self.client.get(key)
             return self._deserialize(data)
         except Exception as e:
@@ -372,14 +522,59 @@ class RedisCache:
             return False
     
     def get_cache_stats(self) -> dict[str, Any]:
-        """Get cache statistics"""
+        """Get cache statistics with actual counts"""
         try:
+            # Get actual gateway counts
+            gateways = self.get_gateways()
+            gateway_count = len(gateways) if gateways else 0
+            connected_count = len([gw for gw in gateways if gw.get('status') == 'connected']) if gateways else 0
+            
+            # Count total WAN ports and active ports
+            total_ports = 0
+            active_ports = 0
+            if gateways:
+                for gw in gateways:
+                    ports = gw.get('ports', [])
+                    total_ports += len(ports)
+                    active_ports += len([p for p in ports if p.get('up')])
+            
+            # Get sites count
+            sites = self.get_sites()
+            sites_count = len(sites) if sites else 0
+            
+            # Get key counts using string literals
+            vpn_keys = self.client.keys(f"{self.PREFIX_VPN_PEERS}:*")
+            insights_keys = self.client.keys(f"{self.PREFIX_INSIGHTS}:*")
+            profiles_keys = self.client.keys("mist:profiles:*")
+            templates_keys = self.client.keys("mist:templates:*")
+            
+            # Count total VPN peer paths (not just number of gateways with peers)
+            total_vpn_peers = 0
+            if vpn_keys:
+                for key in vpn_keys:
+                    try:
+                        data = self.client.get(key)
+                        if data:
+                            peer_data = json.loads(data)
+                            peers_by_port = peer_data.get('peers_by_port', {})
+                            for port_peers in peers_by_port.values():
+                                total_vpn_peers += len(port_peers)
+                    except Exception:
+                        pass  # Skip malformed entries
+            
             stats = {
-                'gateways': self.client.exists(self.PREFIX_GATEWAYS),
-                'sites': self.client.exists(self.PREFIX_SITES),
-                'org': self.client.exists(self.PREFIX_ORG),
-                'vpn_peers_count': len(self.client.keys(f"{self.PREFIX_VPN_PEERS}:*")),
-                'insights_count': len(self.client.keys(f"{self.PREFIX_INSIGHTS}:*")),
+                'gateways_count': gateway_count,
+                'connected_count': connected_count,
+                'total_ports': total_ports,
+                'active_ports': active_ports,
+                'sites_count': sites_count,
+                'vpn_peers_count': total_vpn_peers,
+                'insights_count': len(insights_keys) if insights_keys else 0,
+                'profiles_count': len(profiles_keys) if profiles_keys else 0,
+                'templates_count': len(templates_keys) if templates_keys else 0,
+                'has_org': bool(self.client.exists(self.PREFIX_ORG)),
+                'has_sites': bool(self.client.exists(self.PREFIX_SITES)),
+                'has_gateways': bool(self.client.exists(self.PREFIX_GATEWAYS)),
                 'last_update': self.get_last_update(),
                 'worker_status': self.get_worker_status()
             }

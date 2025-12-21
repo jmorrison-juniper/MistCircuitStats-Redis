@@ -97,6 +97,18 @@ def api_sites():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/cache-stats')
+def api_cache_stats():
+    """Get cache statistics with counts from Redis"""
+    try:
+        c = get_cache()
+        stats = c.get_cache_stats()
+        return jsonify({'success': True, 'data': stats})
+    except Exception as e:
+        logger.error(f"Error getting cache stats: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/gateways')
 def api_gateways():
     """Get all gateway data from cache"""
@@ -230,6 +242,18 @@ def api_token_status():
         logger.error(f"Error getting token status: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+
+@app.route('/api/templates')
+def api_templates():
+    """Get all gateway templates from cache"""
+    try:
+        c = get_cache()
+        templates = c.get_all_gateway_templates()
+        return jsonify({'success': True, 'data': templates})
+    except Exception as e:
+        logger.error(f"Error getting templates: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/health')

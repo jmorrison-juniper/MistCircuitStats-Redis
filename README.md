@@ -154,6 +154,8 @@ volumes:
 
 ## API Endpoints
 
+### Web App Endpoints (served from Redis cache)
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /` | Dashboard HTML |
@@ -164,6 +166,20 @@ volumes:
 | `GET /api/vpn-peers/all` | All VPN peer paths |
 | `GET /api/insights/all` | All traffic insights |
 | `GET /api/token-status` | Worker/cache status |
+
+### Mist API Endpoints (used by worker)
+
+| API Endpoint | Method | Description |
+|--------------|--------|-------------|
+| `mistapi.api.v1.self.self.getSelf` | GET | Get current API token info and privileges |
+| `mistapi.api.v1.orgs.orgs.getOrg` | GET | Get organization details |
+| `mistapi.api.v1.orgs.sites.listOrgSites` | GET | List all sites in organization |
+| `mistapi.api.v1.orgs.stats.listOrgDevicesStats` | GET | List gateway device statistics (type=gateway) |
+| `mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts` | GET | Search WAN port statistics (paginated) |
+| `/api/v1/orgs/{org_id}/stats/vpn_peers/search` | GET | VPN peer path statistics (per device) |
+| `/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats` | GET | Port-specific time-series traffic data |
+
+> **Note**: VPN peers and Insights use direct HTTP requests due to SDK limitations. Time-series charts use the Mist Insights API with parameters: `port_id`, `start`, `end`, `interval`, `metrics=rx_bps,tx_bps`
 
 ## License
 
