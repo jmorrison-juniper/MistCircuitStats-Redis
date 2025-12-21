@@ -192,30 +192,80 @@ def api_all_insights():
 
 @app.route('/api/gateway/<gateway_id>/port/<path:port_id>/traffic')
 def api_port_traffic(gateway_id, port_id):
-    """Get traffic time-series for chart display"""
+    """Get traffic time-series for chart display.
+    
+    Query parameters:
+        duration: Time range to return - '1h', '6h', '1d', '7d', '30d' (default: all data)
+        start: Unix timestamp for start of range (alternative to duration)
+        end: Unix timestamp for end of range (default: now)
+    """
     try:
         from urllib.parse import unquote
+        import time
+        
         port_id = unquote(port_id)
         
         c = get_cache()
         insights = c.get_insights(gateway_id, port_id)
         
-        if insights:
-            return jsonify({
-                'success': True,
-                'data': {
-                    'timestamps': insights.get('timestamps', []),
-                    'rx_bps': insights.get('rx_bps', []),
-                    'tx_bps': insights.get('tx_bps', []),
-                    'rx_bytes': insights.get('rx_bytes', 0),
-                    'tx_bytes': insights.get('tx_bytes', 0)
-                }
-            })
-        else:
+        if not insights:
             return jsonify({
                 'success': True, 
                 'data': {'timestamps': [], 'rx_bps': [], 'tx_bps': [], 'rx_bytes': 0, 'tx_bytes': 0}
             })
+        
+        timestamps = insights.get('timestamps', [])
+        rx_bps = insights.get('rx_bps', [])
+        tx_bps = insights.get('tx_bps', [])
+        
+        # Parse time range parameters
+        duration = request.args.get('duration')
+        start_ts = request.args.get('start', type=int)
+        end_ts = request.args.get('end', type=int, default=int(time.time()))
+        
+        # Convert duration to start timestamp
+        if duration and not start_ts:
+            duration_seconds = {
+                '1h': 60 * 60,
+                '6h': 6 * 60 * 60,
+                '1d': 24 * 60 * 60,
+                '7d': 7 * 24 * 60 * 60,
+                '30d': 30 * 24 * 60 * 60
+            }
+            if duration in duration_seconds:
+                start_ts = end_ts - duration_seconds[duration]
+        
+        # Filter data if time range specified
+        if start_ts:
+            filtered_timestamps = []
+            filtered_rx = []
+            filtered_tx = []
+            
+            for i, ts in enumerate(timestamps):
+                if ts and start_ts <= ts <= end_ts:
+                    filtered_timestamps.append(ts)
+                    filtered_rx.append(rx_bps[i] if i < len(rx_bps) else 0)
+                    filtered_tx.append(tx_bps[i] if i < len(tx_bps) else 0)
+            
+            timestamps = filtered_timestamps
+            rx_bps = filtered_rx
+            tx_bps = filtered_tx
+        
+        # Recalculate bytes for filtered range (assuming 10-min intervals = 600s)
+        interval = 600
+        rx_bytes = sum(bps * interval for bps in rx_bps if bps) // 8
+        tx_bytes = sum(bps * interval for bps in tx_bps if bps) // 8
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'timestamps': timestamps,
+                'rx_bps': rx_bps,
+                'tx_bps': tx_bps,
+                'rx_bytes': rx_bytes,
+                'tx_bytes': tx_bytes
+            }
+        })
     except Exception as e:
         logger.error(f"Error getting port traffic: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -228,6 +278,7 @@ def api_token_status():
         c = get_cache()
         worker_status = c.get_worker_status()
         last_update = c.get_last_update()
+        rate_limit_status = c.get_rate_limit_status()
         
         return jsonify({
             'success': True,
@@ -235,7 +286,8 @@ def api_token_status():
                 'mode': 'redis-cache',
                 'worker_status': worker_status,
                 'last_update': last_update,
-                'cache_valid': c.is_cache_valid()
+                'cache_valid': c.is_cache_valid(),
+                'rate_limit': rate_limit_status
             }
         })
     except Exception as e:

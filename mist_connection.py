@@ -10,6 +10,7 @@ The mistapi SDK natively supports:
 """
 import copy
 import logging
+import os
 import time
 from typing import List, Dict, Optional
 import mistapi
@@ -30,6 +31,9 @@ class MistConnection:
     SITES_CACHE_TTL = 300  # 5 minutes
     PROFILE_CACHE_TTL = 600  # 10 minutes
     TEMPLATE_CACHE_TTL = 2678400  # 31 days for Redis persistence
+    
+    # API rate limiting delay (set via API_DELAY_MS env var, default 2ms)
+    API_DELAY_SECONDS = float(os.environ.get('API_DELAY_MS', '2')) / 1000.0
     
     def __init__(self, api_token: str, org_id: Optional[str] = None, host: str = 'api.mist.com', redis_cache=None):
         """
@@ -86,6 +90,7 @@ class MistConnection:
                     
                     # Test if the token actually works with an API call
                     test_response = mistapi.api.v1.self.self.getSelf(self.apisession)
+                    time.sleep(self.API_DELAY_SECONDS)  # Rate limiting delay
                     if test_response.status_code == 200:
                         logger.info(f"Token {idx + 1}/{len(token_list)} working")
                         # Store all tokens for potential future manual rotation
@@ -107,6 +112,16 @@ class MistConnection:
                     elif test_response.status_code == 429:
                         logger.warning(f"Token {idx + 1}/{len(token_list)} rate limited, trying next...")
                         last_error = Exception(f"Token {idx + 1} rate limited (429)")
+                        # Report incremental rate limit
+                        if self._redis_cache:
+                            try:
+                                self._redis_cache.set_rate_limit_status(
+                                    is_limited=True,
+                                    tokens_exhausted=idx + 1,
+                                    total_tokens=self._token_count
+                                )
+                            except Exception:
+                                pass  # Best effort
                         continue
                     else:
                         logger.warning(f"Token {idx + 1}/{len(token_list)} returned {test_response.status_code}")
@@ -116,13 +131,33 @@ class MistConnection:
                 except SystemExit:
                     logger.warning(f"Token {idx + 1}/{len(token_list)} caused SDK to exit")
                     last_error = Exception(f"Token {idx + 1} caused SDK exit")
+                    # Report rate limit for this token
+                    if self._redis_cache:
+                        try:
+                            self._redis_cache.set_rate_limit_status(
+                                is_limited=True,
+                                tokens_exhausted=idx + 1,
+                                total_tokens=self._token_count
+                            )
+                        except Exception:
+                            pass  # Best effort
                     continue
                 except Exception as e:
                     logger.warning(f"Token {idx + 1}/{len(token_list)} failed: {e}")
                     last_error = e
                     continue
             else:
-                # No token worked
+                # No token worked - report rate limit to Redis for GUI display
+                if self._redis_cache:
+                    try:
+                        self._redis_cache.set_rate_limit_status(
+                            is_limited=True,
+                            tokens_exhausted=self._token_count,
+                            total_tokens=self._token_count
+                        )
+                        logger.warning(f"All {self._token_count} tokens exhausted - rate limit reported")
+                    except Exception as rl_err:
+                        logger.debug(f"Could not report rate limit: {rl_err}")
                 raise last_error or Exception("All tokens failed to initialize")
                 
         finally:
@@ -149,6 +184,27 @@ class MistConnection:
             pass
         return getattr(self, '_current_token_idx', 0)
     
+    def _report_rate_limit(self, tokens_exhausted: int = 0):
+        """Report rate limit status to Redis cache for GUI display"""
+        if self._redis_cache:
+            try:
+                self._redis_cache.set_rate_limit_status(
+                    is_limited=True,
+                    tokens_exhausted=tokens_exhausted,
+                    total_tokens=self._token_count
+                )
+                logger.warning(f"Rate limit reported: {tokens_exhausted}/{self._token_count} tokens exhausted")
+            except Exception as e:
+                logger.debug(f"Could not report rate limit to Redis: {e}")
+    
+    def _clear_rate_limit(self):
+        """Clear rate limit status in Redis cache"""
+        if self._redis_cache:
+            try:
+                self._redis_cache.clear_rate_limit_status()
+            except Exception as e:
+                logger.debug(f"Could not clear rate limit in Redis: {e}")
+    
     def _auto_detect_org(self):
         """Auto-detect organization ID from user privileges"""
         try:
@@ -157,6 +213,7 @@ class MistConnection:
                 data = self._self_data
             else:
                 response = mistapi.api.v1.self.self.getSelf(self.apisession)
+                time.sleep(self.API_DELAY_SECONDS)  # Rate limiting delay
                 if response.status_code != 200:
                     raise Exception(f"Failed to get self info: {response.status_code}")
                 data = response.data
@@ -177,6 +234,7 @@ class MistConnection:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
             response = mistapi.api.v1.orgs.orgs.getOrg(self.apisession, self.org_id)
+            time.sleep(self.API_DELAY_SECONDS)  # Rate limiting delay
             if response.status_code == 200:
                 data = response.data
                 return {
@@ -195,6 +253,7 @@ class MistConnection:
         """Get list of organizations the user has access to"""
         try:
             response = mistapi.api.v1.self.self.getSelf(self.apisession)
+            time.sleep(API_DELAY_SECONDS)
             if response.status_code == 200:
                 data = response.data
                 orgs = []
@@ -228,6 +287,7 @@ class MistConnection:
         current_token_idx = self._get_current_token_index() + 1  # 1-indexed for display
         try:
             response = mistapi.api.v1.self.usage.getSelfApiUsage(self.apisession)
+            time.sleep(API_DELAY_SECONDS)
             if response.status_code == 200:
                 data = response.data
                 return {
@@ -276,6 +336,7 @@ class MistConnection:
                 self.org_id,
                 limit=1000
             )
+            time.sleep(API_DELAY_SECONDS)
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
                 # Store full site data - no filtering to ensure all fields available
@@ -337,6 +398,7 @@ class MistConnection:
                 site_id,
                 device_id
             )
+            time.sleep(API_DELAY_SECONDS)
             if config_response.status_code == 200:
                 config_data = config_response.data
                 # Store in Redis for persistence
@@ -383,6 +445,7 @@ class MistConnection:
                 type='gateway',
                 limit=1000
             )
+            time.sleep(API_DELAY_SECONDS)
             
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
@@ -446,6 +509,7 @@ class MistConnection:
                 self.org_id,  # type: ignore[arg-type]
                 deviceprofile_id
             )
+            time.sleep(API_DELAY_SECONDS)
             if response.status_code == 200:
                 profile_data = response.data
                 MistConnection._device_profile_cache[cache_key] = profile_data
@@ -494,6 +558,7 @@ class MistConnection:
                 self.org_id,  # type: ignore[arg-type]
                 gatewaytemplate_id
             )
+            time.sleep(API_DELAY_SECONDS)
             if response.status_code == 200:
                 template_data = response.data
                 MistConnection._gateway_template_cache[cache_key] = template_data
@@ -545,6 +610,7 @@ class MistConnection:
                 type='gateway',
                 limit=1000
             )
+            time.sleep(API_DELAY_SECONDS)
             
             if device_response.status_code != 200:
                 raise Exception(f"API error getting device stats: {device_response.status_code}")
@@ -569,6 +635,7 @@ class MistConnection:
                 self.org_id,  # type: ignore[arg-type]
                 **port_params  # type: ignore[arg-type]
             )
+            time.sleep(API_DELAY_SECONDS)
             
             if port_response.status_code == 200:
                 # Use get_all to handle pagination automatically
@@ -664,10 +731,10 @@ class MistConnection:
                     # Merge device-level port_config (overrides profile settings)
                     # Track which ports have device-level overrides
                     device_port_config = device_config.get('port_config', {})
-                    overridden_ports = set()  # Ports that exist at device level = override
+                    device_override_ports = set()  # Ports that exist at device level = override
                     if device_port_config:
                         for port_name, port_cfg in device_port_config.items():
-                            overridden_ports.add(port_name)  # This port has device-level config
+                            device_override_ports.add(port_name)  # This port has device-level config
                             if port_name in merged_port_config:
                                 # Merge: device config overrides profile
                                 merged_port_config[port_name].update(port_cfg)
@@ -705,6 +772,7 @@ class MistConnection:
                             mac=gw_mac,
                             stats=True
                         )
+                        time.sleep(API_DELAY_SECONDS)
                         
                         if device_search_response.status_code == 200:
                             search_results = device_search_response.data.get('results', [])
@@ -801,9 +869,12 @@ class MistConnection:
                     address_mode_map = {'dynamic': 'dhcp', 'static': 'static'}
                     runtime_type = address_mode_map.get(raw_address_mode.lower(), template_type)
                     
-                    # SIMPLE OVERRIDE DETECTION:
-                    # If runtime type != template type, it's an override
-                    is_overridden = (runtime_type != template_type)
+                    # OVERRIDE DETECTION:
+                    # 1. If runtime type != template type, it's an override (e.g., template=DHCP but device=Static)
+                    # 2. If port has device-level config, it's an override (site-level IP/gateway override)
+                    type_override = (runtime_type != template_type)
+                    device_config_override = port_id in device_override_ports
+                    is_overridden = type_override or device_config_override
                     
                     # Get IP address (from runtime for DHCP, from config for static)
                     if runtime_ip_data and runtime_ip_data.get('ip'):
@@ -896,8 +967,12 @@ class MistConnection:
                     address_mode_map = {'dynamic': 'dhcp', 'static': 'static'}
                     runtime_type = address_mode_map.get(raw_address_mode.lower(), template_type)
                     
-                    # Override = template type != runtime type
-                    is_overridden = (runtime_type != template_type)
+                    # OVERRIDE DETECTION:
+                    # 1. If runtime type != template type, it's an override
+                    # 2. If port has device-level config, it's an override
+                    type_override = (runtime_type != template_type)
+                    device_config_override = cfg_port_name in device_override_ports or base_port_name in device_override_ports
+                    is_overridden = type_override or device_config_override
                     
                     # Get IP address
                     if runtime_ip_data and runtime_ip_data.get('ip'):
@@ -987,6 +1062,7 @@ class MistConnection:
                 type='gateway',
                 mac=gateway_id
             )
+            time.sleep(API_DELAY_SECONDS)
             
             if response.status_code == 200:
                 gw = response.data
@@ -1023,11 +1099,7 @@ class MistConnection:
     
     def get_vpn_peer_stats(self, site_id: str, device_mac: str) -> Dict:
         """
-        Get VPN peer path statistics for a gateway
-        
-        Note: This uses direct requests as mistapi doesn't have a dedicated
-        VPN peer search method. The SDK's rate limiting doesn't apply here,
-        but 429 responses are handled gracefully.
+        Get VPN peer path statistics for a gateway using the mistapi SDK.
         
         Args:
             site_id: Site ID
@@ -1036,31 +1108,22 @@ class MistConnection:
         Returns:
             Dictionary with peer path statistics grouped by port_id
         """
-        import requests as http_requests
-        
         try:
             if not self.org_id:
                 raise ValueError("Organization ID is required")
             
-            # Get the first token for direct API calls
-            # For multi-token, SDK handles rotation but we only have access to the session's current token
-            current_token = self.apisession._apitoken[self.apisession._apitoken_index] if hasattr(self.apisession, '_apitoken') and self.apisession._apitoken else self.api_token.split(',')[0].strip()
-            
-            headers = {
-                'Authorization': f'Token {current_token}',
-                'Content-Type': 'application/json'
-            }
-            
-            url = f'https://{self.host}/api/v1/orgs/{self.org_id}/stats/vpn_peers/search'
-            params = {
-                'site_id': site_id,
-                'mac': device_mac
-            }
-            
-            response = http_requests.get(url, headers=headers, params=params)
+            # Use SDK method: mistapi.api.v1.orgs.stats.searchOrgPeerPathStats
+            response = mistapi.api.v1.orgs.stats.searchOrgPeerPathStats(
+                self.apisession,
+                self.org_id,
+                site_id=site_id,
+                mac=device_mac
+            )
+            time.sleep(API_DELAY_SECONDS)
             
             if response.status_code == 429:
-                # Rate limited - return gracefully
+                # Rate limited - report to Redis and return gracefully
+                self._report_rate_limit(tokens_exhausted=self._token_count)
                 logger.warning(f"VPN peer stats rate limited for device {device_mac}")
                 return {
                     'success': False,
@@ -1070,8 +1133,7 @@ class MistConnection:
                 }
             
             if response.status_code == 200:
-                data = response.json()
-                results = data.get('results', [])
+                results = response.data.get('results', [])
                 
                 # Group peer paths by port_id
                 peers_by_port = {}
@@ -1116,19 +1178,20 @@ class MistConnection:
             }
 
     def _get_port_insights(self, site_id: str, gateway_id: str, port_id: str, 
-                           start: int, end: int, interval: int = 3600) -> Optional[Dict]:
+                           start: int, end: int, interval: int = 600) -> Optional[Dict]:
         """
         Fetch traffic insights for a specific gateway port.
         
-        Uses direct HTTP request as SDK doesn't support this endpoint.
+        Uses direct HTTP request as SDK doesn't support this endpoint yet.
+        Endpoint: /api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats
         
         Args:
             site_id: Site ID
-            gateway_id: Gateway device ID
+            gateway_id: Gateway device ID (UUID format, not MAC)
             port_id: Port identifier (e.g., 'ge-0/0/0')
             start: Start timestamp (Unix epoch)
             end: End timestamp (Unix epoch)
-            interval: Sample interval in seconds (default 3600 = 1 hour)
+            interval: Sample interval in seconds (default 600 = 10 minutes)
             
         Returns:
             Dict with timestamps, rx_bps, tx_bps, rx_bytes, tx_bytes or None on error
@@ -1136,7 +1199,7 @@ class MistConnection:
         import requests
         
         try:
-            # Get current token
+            # Get current token from the session
             current_token = self.api_token.split(',')[0].strip()
             try:
                 tokens = getattr(self.apisession, '_apitoken', None)
@@ -1151,6 +1214,7 @@ class MistConnection:
                 'Content-Type': 'application/json'
             }
             
+            # Correct endpoint: /api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats
             url = f'https://{self.host}/api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats'
             params = {
                 'interval': interval,
@@ -1161,35 +1225,58 @@ class MistConnection:
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=30)
+            time.sleep(API_DELAY_SECONDS)
             
             if response.status_code == 200:
                 data = response.json()
+                
+                # API returns rx_bps and tx_bps arrays directly (values can be null)
                 rx_bps_list = data.get('rx_bps', [])
                 tx_bps_list = data.get('tx_bps', [])
+                timestamps = data.get('rt', [])
+                response_interval = data.get('interval', interval)
                 
-                # Calculate total bytes transferred
-                rx_bytes = sum(bps * interval for bps in rx_bps_list if bps) // 8
-                tx_bytes = sum(bps * interval for bps in tx_bps_list if bps) // 8
+                # Convert null values to 0
+                rx_bps_list = [v if v is not None else 0 for v in rx_bps_list]
+                tx_bps_list = [v if v is not None else 0 for v in tx_bps_list]
+                
+                # Convert ISO timestamps to Unix timestamps if needed
+                unix_timestamps = []
+                for ts in timestamps:
+                    if isinstance(ts, str):
+                        # Parse ISO format: "2025-12-21T18:20:00Z"
+                        from datetime import datetime
+                        try:
+                            dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                            unix_timestamps.append(int(dt.timestamp()))
+                        except Exception:
+                            unix_timestamps.append(0)
+                    else:
+                        unix_timestamps.append(ts)
+                
+                # Calculate total bytes transferred from bps values
+                # bytes = bps * interval_seconds / 8
+                rx_bytes = sum(bps * response_interval for bps in rx_bps_list if bps) // 8
+                tx_bytes = sum(bps * response_interval for bps in tx_bps_list if bps) // 8
                 
                 return {
-                    'timestamps': data.get('timestamps', []),
+                    'timestamps': unix_timestamps,
                     'rx_bps': rx_bps_list,
                     'tx_bps': tx_bps_list,
                     'rx_bytes': rx_bytes,
-                    'tx_bytes': tx_bytes
+                    'tx_bytes': tx_bytes,
+                    'interval': response_interval
                 }
             elif response.status_code == 429:
-                logger.warning(f"Rate limited on insights for {gateway_id}/{port_id}")
+                self._report_rate_limit(tokens_exhausted=self._token_count)
+                logger.warning(f"Rate limited on gateway insights for {gateway_id}/{port_id}")
                 return None
             else:
-                logger.debug(f"Insights API returned {response.status_code} for {gateway_id}/{port_id}")
+                logger.debug(f"Gateway insights API returned {response.status_code} for {gateway_id}/{port_id}")
                 return None
                 
-        except requests.exceptions.Timeout:
-            logger.warning(f"Timeout fetching insights for {gateway_id}/{port_id}")
-            return None
         except Exception as e:
-            logger.warning(f"Error fetching insights for {gateway_id}/{port_id}: {e}")
+            logger.warning(f"Error fetching gateway insights for {gateway_id}/{port_id}: {e}")
             return None
 
     def get_gateway_device_list(self) -> List[Dict]:
@@ -1217,6 +1304,7 @@ class MistConnection:
                 type='gateway',
                 limit=1000
             )
+            time.sleep(API_DELAY_SECONDS)
             
             if device_response.status_code != 200:
                 raise Exception(f"API error getting device stats: {device_response.status_code}")
@@ -1266,6 +1354,7 @@ class MistConnection:
                 self.org_id,
                 **port_params
             )
+            time.sleep(API_DELAY_SECONDS)
             
             if port_response.status_code != 200:
                 raise Exception(f"API error getting port stats: {port_response.status_code}")
@@ -1306,6 +1395,7 @@ class MistConnection:
                         self.org_id,
                         **port_params
                     )
+                    time.sleep(API_DELAY_SECONDS)
                 else:
                     break
             
@@ -1340,6 +1430,7 @@ class MistConnection:
                 type='gateway',
                 limit=1000
             )
+            time.sleep(API_DELAY_SECONDS)
             
             if port_response.status_code != 200:
                 raise Exception(f"API error getting port stats: {port_response.status_code}")
@@ -1391,6 +1482,7 @@ class MistConnection:
                 device_type='gateway',
                 limit=1000
             )
+            time.sleep(API_DELAY_SECONDS)
             
             if port_response.status_code != 200:
                 logger.warning(f"API error getting port stats for site {site_id}: {port_response.status_code}")
@@ -1502,6 +1594,7 @@ class MistConnection:
                 mac=gw_mac,
                 stats=True
             )
+            time.sleep(API_DELAY_SECONDS)
             
             if device_search_response.status_code == 200:
                 search_results = device_search_response.data.get('results', [])

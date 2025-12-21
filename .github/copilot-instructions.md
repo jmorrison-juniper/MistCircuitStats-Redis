@@ -38,6 +38,7 @@ This version separates API fetching (worker) from serving (web app) to support m
 - `mist:insights:{gateway_id}:{port_id}` - Traffic insights per port
 - `mist:metadata:last_update` - Last worker update timestamp
 - `mist:metadata:worker_status` - Worker status (idle/running/error)
+- `mist:metadata:rate_limit` - Rate limit status (is_limited, reset_time, tokens_exhausted)
 
 ## Development Guidelines
 - Web app should NEVER make Mist API calls directly
@@ -70,10 +71,10 @@ This version separates API fetching (worker) from serving (web app) to support m
 | `mistapi.api.v1.orgs.sites.listOrgSites` | GET | List all sites in organization |
 | `mistapi.api.v1.orgs.stats.listOrgDevicesStats` | GET | List gateway device statistics (type=gateway) |
 | `mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts` | GET | Search WAN port statistics (paginated) |
-| `/api/v1/orgs/{org_id}/stats/vpn_peers/search` | GET | VPN peer path statistics (per device) |
-| `/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats` | GET | Port-specific time-series traffic data |
+| `mistapi.api.v1.orgs.stats.searchOrgPeerPathStats` | GET | VPN peer path statistics (per device) |
+| `/api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats` | GET | Gateway port traffic insights (rx_bps, tx_bps) - uses requests |
 
-> **Note**: VPN peers and Insights use direct HTTP requests (not SDK) due to SDK limitations
+> **Note**: Most endpoints use the mistapi SDK. Gateway insights uses direct HTTP requests as SDK doesn't support it yet.
 
 ## Container Development Guidelines
 - Docker Compose services: redis, worker, web
@@ -104,3 +105,36 @@ This version separates API fetching (worker) from serving (web app) to support m
 - Publishes to ghcr.io
 - Multi-arch builds: linux/amd64, linux/arm64
 - Three container images: redis (official), worker, web
+
+## Mist Configuration Hierarchy & Override Detection
+
+### Template Assignment
+- **Gateway templates are assigned at the SITE level**, not the device level
+- Sites have a `gatewaytemplate_id` field that points to the template
+- To find a gateway's template: look up the gateway's `site_id` → find the site → get `site.gatewaytemplate_id`
+- Templates are cached in Redis with key `mist:templates:{template_id}`
+
+### Port Configuration Inheritance
+1. **Template level**: `template.port_config[port_name].ip_config.type` defines the expected port type (dhcp/static)
+2. **Device level**: The actual running config on the device (from `searchSiteDevices` API)
+3. **Override detection**: Compare device's actual port type against the template's expected type
+
+### Frontend Override Computation
+The frontend (not backend) computes override status by:
+```javascript
+// 1. Find the site to get its gatewaytemplate_id
+const site = allSites.find(s => s.id === gateway.site_id);
+const templateId = site ? site.gatewaytemplate_id : null;
+// 2. Look up the template
+const template = templateId ? allTemplates[templateId] : null;
+// 3. Get the template's port config type for this port
+const templatePortConfig = template?.port_config?.[portName];
+const templateType = templatePortConfig?.ip_config?.type || 'dhcp';
+// 4. Compare: if runtime type differs from template type, it's an override
+const isOverride = runtimeType && templateType && (runtimeType !== templateType);
+```
+
+### Key APIs for Template/Config Data
+- `/api/sites` - Returns sites with `gatewaytemplate_id` field
+- `/api/templates` - Returns all gateway templates keyed by template ID
+- `/api/gateways` - Returns gateway data with ports containing `type` (actual running config)

@@ -430,6 +430,14 @@
                 <i class="bi bi-router"></i> Mist Circuit Stats <small class="text-muted">(Redis)</small>
             </span>
             <div class="d-flex align-items-center">
+                <!-- Rate Limit Warning (hidden by default) -->
+                <div class="me-3 small" id="rateLimitWarning" style="display: none;">
+                    <span class="text-warning">
+                        <i class="bi bi-exclamation-triangle-fill"></i> 
+                        Rate Limited - Resets at <span id="rateLimitResetTime">--:--</span>
+                        <span class="badge bg-warning text-dark ms-1" id="rateLimitCountdown"></span>
+                    </span>
+                </div>
                 <!-- Token Status -->
                 <div class="me-3 small" id="tokenStatus" title="API Token Status">
                     <span class="text-muted"><i class="bi bi-key"></i> Token: <span id="currentToken">-</span>/<span id="tokenCount">-</span></span>
@@ -720,9 +728,11 @@
         let loadingStartTime = null;
         let loadingTimerInterval = null;
         
-        // Token status refresh interval (5 minutes)
+        // Token status refresh interval (5 minutes normally, 10 seconds when rate limited)
         let tokenStatusInterval = null;
+        let rateLimitCountdownInterval = null;
         const TOKEN_STATUS_REFRESH_MS = 5 * 60 * 1000;
+        const TOKEN_STATUS_REFRESH_RATE_LIMITED_MS = 10 * 1000;  // 10 seconds when rate limited
         
         function startLoadingProgress() {
             loadingStartTime = Date.now();
@@ -872,22 +882,64 @@
                     const workerStatus = status.worker_status || {};
                     const lastUpdate = status.last_update ? new Date(status.last_update * 1000) : null;
                     
-                    // Update cache status display
-                    document.getElementById('currentToken').textContent = status.cache_valid ? '✓' : '✗';
-                    document.getElementById('tokenCount').textContent = 'Cache';
+                    // Handle rate limit display
+                    const rateLimit = status.rate_limit || {};
+                    const rateLimitWarning = document.getElementById('rateLimitWarning');
                     
-                    const statusClass = status.cache_valid ? 'text-success' : 'text-danger';
-                    const statusText = workerStatus.status || 'unknown';
-                    document.getElementById('apiUsage').innerHTML = 
-                        `<span class="${statusClass}">${statusText}</span>`;
+                    if (rateLimit.is_limited && rateLimit.reset_time) {
+                        const resetTime = new Date(rateLimit.reset_time * 1000);
+                        const now = new Date();
+                        
+                        // Show rate limit warning
+                        rateLimitWarning.style.display = 'block';
+                        document.getElementById('rateLimitResetTime').textContent = 
+                            resetTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        
+                        // Calculate countdown
+                        const secondsRemaining = Math.max(0, Math.floor((resetTime - now) / 1000));
+                        const minutes = Math.floor(secondsRemaining / 60);
+                        const seconds = secondsRemaining % 60;
+                        document.getElementById('rateLimitCountdown').textContent = 
+                            `${minutes}m ${seconds}s`;
+                        
+                        // Update status to show rate limited
+                        document.getElementById('apiUsage').innerHTML = 
+                            `<span class="text-warning">rate-limited</span>`;
+                    } else {
+                        // Hide rate limit warning
+                        rateLimitWarning.style.display = 'none';
+                        
+                        // Update cache status display
+                        document.getElementById('currentToken').textContent = status.cache_valid ? '✓' : '✗';
+                        document.getElementById('tokenCount').textContent = 'Cache';
+                        
+                        const statusClass = status.cache_valid ? 'text-success' : 'text-danger';
+                        const statusText = workerStatus.status || 'unknown';
+                        document.getElementById('apiUsage').innerHTML = 
+                            `<span class="${statusClass}">${statusText}</span>`;
+                    }
                     
                     // Update tooltip with cache details
                     const lastUpdateStr = lastUpdate ? lastUpdate.toLocaleTimeString() : 'Never';
+                    const rateLimitInfo = rateLimit.is_limited ? 
+                        `\nRate Limited: Yes (${rateLimit.tokens_exhausted || 0}/${rateLimit.total_tokens || 0} tokens exhausted)` : '';
                     document.getElementById('tokenStatus').title = 
                         `Cache Status: ${status.cache_valid ? 'Valid' : 'Empty'}\n` +
-                        `Worker: ${statusText}\n` +
+                        `Worker: ${workerStatus.status || 'unknown'}\n` +
                         `Last Update: ${lastUpdateStr}\n` +
-                        `Data served from Redis cache`;
+                        `Data served from Redis cache${rateLimitInfo}`;
+                    
+                    // Adjust refresh interval based on rate limit status
+                    const desiredInterval = rateLimit.is_limited ? 
+                        TOKEN_STATUS_REFRESH_RATE_LIMITED_MS : TOKEN_STATUS_REFRESH_MS;
+                    
+                    // Update interval if needed (store current interval in a data attribute)
+                    const currentInterval = parseInt(document.body.dataset.tokenRefreshInterval || TOKEN_STATUS_REFRESH_MS);
+                    if (currentInterval !== desiredInterval) {
+                        clearInterval(tokenStatusInterval);
+                        tokenStatusInterval = setInterval(fetchTokenStatus, desiredInterval);
+                        document.body.dataset.tokenRefreshInterval = desiredInterval;
+                    }
                 }
             } catch (error) {
                 console.error('Error fetching cache status:', error);
@@ -901,8 +953,9 @@
             loadData();
             fetchTokenStatus();
             
-            // Refresh token status every 5 minutes
+            // Refresh token status every 5 minutes (will be adjusted if rate limited)
             tokenStatusInterval = setInterval(fetchTokenStatus, TOKEN_STATUS_REFRESH_MS);
+            document.body.dataset.tokenRefreshInterval = TOKEN_STATUS_REFRESH_MS;
             
             // Refresh cache stats every 30 seconds
             setInterval(loadCacheStats, 30000);
@@ -1359,39 +1412,26 @@
                                 const wanName = port.wan_name || (port.vpn_overlays && port.vpn_overlays[0] ? port.vpn_overlays[0].wan_name : '') || '-';
                                 const vlan = port.vlan_id || (portName.match(/\.(\d+)$/) ? portName.match(/\.(\d+)$/)[1] : '-');
                                 
-                                // Runtime type from address_mode (what device is actually running)
-                                const addressMode = (port.address_mode || '').toLowerCase();
-                                const runtimeType = addressMode === 'dynamic' ? 'dhcp' : (addressMode === 'static' ? 'static' : '');
+                                // Get the actual config type from the port (what the device is actually using)
+                                const runtimeType = port.type || ((port.address_mode || '').toLowerCase() === 'dynamic' ? 'dhcp' : 
+                                                    (port.address_mode || '').toLowerCase() === 'static' ? 'static' : '');
                                 
-                                // Get template type by looking up site's assigned template
-                                // 1. Find the site for this gateway
-                                // 2. Get the site's gatewaytemplate_id
-                                // 3. Look up that template's port_config for this port
-                                let templateType = '';
+                                // OVERRIDE DETECTION: Compare device port type against site's template port type
+                                // 1. Find the site to get its gatewaytemplate_id
                                 const site = allSites.find(s => s.id === gateway.site_id);
-                                if (site && site.gatewaytemplate_id && allTemplates[site.gatewaytemplate_id]) {
-                                    const template = allTemplates[site.gatewaytemplate_id];
-                                    const portConfig = template.port_config?.[portName];
-                                    if (portConfig && portConfig.ip_config) {
-                                        templateType = portConfig.ip_config.type || 'dhcp';
-                                    }
-                                }
-                                
-                                // Override = runtime type doesn't match template type
-                                const isOverride = runtimeType && templateType && runtimeType !== templateType;
+                                const templateId = site ? site.gatewaytemplate_id : null;
+                                // 2. Look up the template
+                                const template = templateId ? allTemplates[templateId] : null;
+                                // 3. Get the template's port config type for this port
+                                const templatePortConfig = template?.port_config?.[portName];
+                                const templateType = templatePortConfig?.ip_config?.type || 'dhcp';
+                                // 4. Compare: if runtime type differs from template type, it's an override
+                                const isOverride = runtimeType && templateType && (runtimeType !== templateType);
                                 
                                 const isEnabled = port.enabled !== undefined ? port.enabled : (port.up || false);
                                 
-                                // For gateway IP, only show if it's a static port with a configured gateway
-                                // DHCP ports learn gateway dynamically and Mist API doesn't expose the learned value
-                                let gatewayIP = '-';
-                                if (runtimeType === 'static' && site && site.gatewaytemplate_id && allTemplates[site.gatewaytemplate_id]) {
-                                    const template = allTemplates[site.gatewaytemplate_id];
-                                    const portConfig = template.port_config?.[portName];
-                                    if (portConfig && portConfig.ip_config && portConfig.ip_config.gateway) {
-                                        gatewayIP = portConfig.ip_config.gateway;
-                                    }
-                                }
+                                // Use gateway from backend (already merged from device override + template)
+                                const gatewayIP = port.gateway || '-';
                                 
                                 return `
                                 <tr>
@@ -1504,23 +1544,21 @@
                         // Use vlan_id from backend, fallback to parsing from port name
                         const vlan = port.vlan_id || (portName.match(/\.(\d+)$/) ? portName.match(/\.(\d+)$/)[1] : '-');
                         
-                        // Runtime type from address_mode
-                        const addressMode = (port.address_mode || '').toLowerCase();
-                        const runtimeType = addressMode === 'dynamic' ? 'dhcp' : (addressMode === 'static' ? 'static' : '');
+                        // Get the actual config type from the port (what the device is actually using)
+                        const runtimeType = port.type || ((port.address_mode || '').toLowerCase() === 'dynamic' ? 'dhcp' : 
+                                            (port.address_mode || '').toLowerCase() === 'static' ? 'static' : '');
                         
-                        // Get template type by looking up site's assigned template
-                        let templateType = '';
+                        // OVERRIDE DETECTION: Compare device port type against site's template port type
+                        // 1. Find the site to get its gatewaytemplate_id
                         const site = allSites.find(s => s.id === gateway.site_id);
-                        if (site && site.gatewaytemplate_id && allTemplates[site.gatewaytemplate_id]) {
-                            const template = allTemplates[site.gatewaytemplate_id];
-                            const portConfig = template.port_config?.[portName];
-                            if (portConfig && portConfig.ip_config) {
-                                templateType = portConfig.ip_config.type || 'dhcp';
-                            }
-                        }
-                        
-                        // Override = runtime != template
-                        const isOverride = runtimeType && templateType && runtimeType !== templateType;
+                        const templateId = site ? site.gatewaytemplate_id : null;
+                        // 2. Look up the template
+                        const template = templateId ? allTemplates[templateId] : null;
+                        // 3. Get the template's port config type for this port
+                        const templatePortConfig = template?.port_config?.[portName];
+                        const templateType = templatePortConfig?.ip_config?.type || 'dhcp';
+                        // 4. Compare: if runtime type differs from template type, it's an override
+                        const isOverride = runtimeType && templateType && (runtimeType !== templateType);
                         
                         // Get peer paths - try exact match first, then look for VLAN-tagged ports
                         let peers = peersByPort[portName] || [];
@@ -1540,15 +1578,8 @@
                         // Use 'of' instead of '/' to prevent Excel from converting to date
                         const peerPathsStr = totalCount > 0 ? `${upCount} of ${totalCount}` : '-';
                         
-                        // For gateway IP, only show for static ports with configured gateway
-                        let gatewayIP = '';
-                        if (runtimeType === 'static' && site && site.gatewaytemplate_id && allTemplates[site.gatewaytemplate_id]) {
-                            const template = allTemplates[site.gatewaytemplate_id];
-                            const portConfig = template.port_config?.[portName];
-                            if (portConfig && portConfig.ip_config && portConfig.ip_config.gateway) {
-                                gatewayIP = portConfig.ip_config.gateway;
-                            }
-                        }
+                        // Use gateway from backend (already merged from device override + template)
+                        const gatewayIP = port.gateway || '';
                         
                         rows.push([
                             siteName,
@@ -1668,7 +1699,7 @@
             currentChartViewDuration = viewDuration;
             updateChartFilterButtons();
             
-            // Re-fetch data with optimal resolution for the selected duration
+            // Fetch filtered data from backend
             fetchAndDisplayTraffic(viewDuration);
         }
         
@@ -1695,28 +1726,10 @@
             
             const { siteId, deviceId, portId } = currentChartContext;
             
-            const end = Math.floor(Date.now() / 1000);
-            
-            // Use optimal resolution based on duration:
-            // Mist API stores data at ~10-min granularity, finer intervals have nulls
-            // - 1h: 5-min resolution (12 points) - best detail for short window
-            // - 6h: 5-min resolution (72 points) - good detail
-            // - 1d: 10-min resolution (144 points, ~88% valid)
-            // - 7d: 1-hour resolution (168 points, 100% valid)
-            const durationConfig = {
-                '1h':  { seconds: 60 * 60,          interval: 300 },   // 12 points at 5-min
-                '6h':  { seconds: 6 * 60 * 60,      interval: 300 },   // 72 points at 5-min
-                '1d':  { seconds: 24 * 60 * 60,     interval: 600 },   // 144 points at 10-min
-                '7d':  { seconds: 7 * 24 * 60 * 60, interval: 3600 }   // 168 points at 1-hour
-            };
-            
-            const config = durationConfig[viewDuration] || durationConfig['7d'];
-            const start = end - config.seconds;
-            
             try {
+                // Fetch filtered data from backend using duration parameter
                 const response = await fetch(
-                    `/api/gateway/${deviceId}/port/${encodeURIComponent(portId)}/traffic?` +
-                    `site_id=${siteId}&start=${start}&end=${end}&interval=${config.interval}`
+                    `/api/gateway/${deviceId}/port/${encodeURIComponent(portId)}/traffic?duration=${viewDuration}`
                 );
                 
                 if (!response.ok) {
@@ -1729,11 +1742,10 @@
                     throw new Error(result.error || 'Failed to fetch traffic data');
                 }
                 
-                // Add interval to data and cache it
-                result.data.interval = config.interval;
+                // Cache the data for this duration
                 cachedTrafficData = result.data;
                 
-                // Create charts
+                // Create charts with filtered data
                 createTrafficCharts(result.data, portId);
             } catch (error) {
                 console.error('Error fetching traffic data:', error);

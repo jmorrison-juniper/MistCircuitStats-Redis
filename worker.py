@@ -202,12 +202,12 @@ class DataWorker:
                     logger.error(f"[Worker-VPN] Error: {e}")
             
             def fetch_insights():
-                """Worker 5: Fetch insights (waits for ports)"""
+                """Worker 5: Fetch insights (waits for gateways - runs in parallel with ports)"""
                 try:
                     if self.skip_enrichment:
                         logger.info("[Worker-Insights] Skipped (SKIP_ENRICHMENT=true)")
                         return
-                    ports_ready.wait(timeout=600)  # May take a while
+                    gateways_ready.wait(timeout=120)  # Only need gateway list, not full port stats
                     gws = gateways_data['list']
                     if not gws:
                         logger.warning("[Worker-Insights] No gateways available")
@@ -763,8 +763,8 @@ class DataWorker:
             import requests
             
             end = int(time.time())
-            start = end - (7 * 24 * 60 * 60)
-            interval = 3600
+            start = end - (7 * 24 * 60 * 60)  # 7 days
+            interval = 600  # 10-minute resolution for granular data
             
             all_insights = {}
             total_ports = sum(len(gw.get('ports', [])) for gw in gateways if gw.get('ports'))
@@ -777,16 +777,19 @@ class DataWorker:
                 if not all([site_id, port_id, gw_id]):
                     return None
                 try:
+                    # Pass gateway_id (UUID), not MAC - the API uses device ID
                     insights = self.mist._get_port_insights(site_id, gw_id, port_id, start, end, interval)
                     return (gw_id, port_id, insights)
                 except Exception:
                     return None
             
             # Build list of (gateway, port) tuples to process
+            # Use port_usage or usage field - both indicate WAN ports
             tasks = []
             for gw in gateways:
                 for port in gw.get('ports', []):
-                    if port.get('port_usage') == 'wan':
+                    port_usage = port.get('port_usage') or port.get('usage', '')
+                    if port_usage == 'wan':
                         tasks.append((gw, port))
             
             logger.info(f"Fetching insights for {len(tasks)} WAN ports in parallel ({self.parallel_workers} workers)...")
@@ -803,6 +806,8 @@ class DataWorker:
                             if gw_id not in all_insights:
                                 all_insights[gw_id] = {}
                             all_insights[gw_id][port_id] = insights
+                            # Store individual insight immediately so charts work during fetch
+                            self.cache.set_insights(gw_id, port_id, insights, ttl=self.cache_ttl)
                     
                     if processed[0] % 100 == 0:
                         self.cache.set_loading_phase('insights', 5, {
@@ -812,7 +817,7 @@ class DataWorker:
                         })
                         logger.info(f"Insights progress: {processed[0]}/{len(tasks)}")
             
-            # Store insights
+            # Store all insights (backup/bulk storage)
             if all_insights:
                 self.cache.set_all_insights(all_insights, ttl=self.cache_ttl)
             

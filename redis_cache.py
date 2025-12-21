@@ -166,7 +166,9 @@ class RedisCache:
             templates = {}
             keys = self.client.keys("mist:templates:*")
             for key in keys:
-                template_id = key.decode().replace("mist:templates:", "")
+                # Handle both bytes and str (depends on redis client version)
+                key_str = key.decode() if isinstance(key, bytes) else key
+                template_id = key_str.replace("mist:templates:", "")
                 data = self.client.get(key)
                 if data:
                     templates[template_id] = self._deserialize(data)
@@ -495,6 +497,61 @@ class RedisCache:
         except Exception as e:
             logger.error(f"Error retrieving worker status: {e}")
             return None
+    
+    def set_rate_limit_status(self, is_limited: bool, reset_time: Optional[int] = None, 
+                               tokens_exhausted: int = 0, total_tokens: int = 0) -> bool:
+        """Store rate limit status. Tokens reset at the top of each clock hour."""
+        try:
+            if is_limited and reset_time is None:
+                # Calculate next hour reset time
+                import math
+                current_time = time.time()
+                reset_time = int(math.ceil(current_time / 3600) * 3600)
+            
+            status_data = {
+                'is_limited': is_limited,
+                'reset_time': reset_time,
+                'tokens_exhausted': tokens_exhausted,
+                'total_tokens': total_tokens,
+                'timestamp': time.time()
+            }
+            # Set with TTL of 1 hour max (will auto-clear if we forget)
+            self.client.setex(
+                f"{self.PREFIX_METADATA}:rate_limit", 
+                3600,  # 1 hour TTL
+                self._serialize(status_data)
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error storing rate limit status: {e}")
+            return False
+    
+    def get_rate_limit_status(self) -> Optional[dict[str, Any]]:
+        """Retrieve rate limit status"""
+        try:
+            data = self.client.get(f"{self.PREFIX_METADATA}:rate_limit")
+            if data:
+                status = self._deserialize(data)
+                # Check if rate limit has expired
+                if status and status.get('reset_time'):
+                    if time.time() >= status['reset_time']:
+                        # Rate limit expired, clear it
+                        self.clear_rate_limit_status()
+                        return {'is_limited': False}
+                return status
+            return {'is_limited': False}
+        except Exception as e:
+            logger.error(f"Error retrieving rate limit status: {e}")
+            return {'is_limited': False}
+    
+    def clear_rate_limit_status(self) -> bool:
+        """Clear rate limit status"""
+        try:
+            self.client.delete(f"{self.PREFIX_METADATA}:rate_limit")
+            return True
+        except Exception as e:
+            logger.error(f"Error clearing rate limit status: {e}")
+            return False
     
     # ==================== Utility ====================
     
