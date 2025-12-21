@@ -253,7 +253,7 @@ class MistConnection:
         """Get list of organizations the user has access to"""
         try:
             response = mistapi.api.v1.self.self.getSelf(self.apisession)
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             if response.status_code == 200:
                 data = response.data
                 orgs = []
@@ -287,7 +287,7 @@ class MistConnection:
         current_token_idx = self._get_current_token_index() + 1  # 1-indexed for display
         try:
             response = mistapi.api.v1.self.usage.getSelfApiUsage(self.apisession)
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             if response.status_code == 200:
                 data = response.data
                 return {
@@ -336,7 +336,7 @@ class MistConnection:
                 self.org_id,
                 limit=1000
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
                 # Store full site data - no filtering to ensure all fields available
@@ -398,7 +398,7 @@ class MistConnection:
                 site_id,
                 device_id
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             if config_response.status_code == 200:
                 config_data = config_response.data
                 # Store in Redis for persistence
@@ -445,7 +445,7 @@ class MistConnection:
                 type='gateway',
                 limit=1000
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if response.status_code == 200:
                 # Use get_all to handle pagination automatically
@@ -509,7 +509,7 @@ class MistConnection:
                 self.org_id,  # type: ignore[arg-type]
                 deviceprofile_id
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             if response.status_code == 200:
                 profile_data = response.data
                 MistConnection._device_profile_cache[cache_key] = profile_data
@@ -558,7 +558,7 @@ class MistConnection:
                 self.org_id,  # type: ignore[arg-type]
                 gatewaytemplate_id
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             if response.status_code == 200:
                 template_data = response.data
                 MistConnection._gateway_template_cache[cache_key] = template_data
@@ -610,7 +610,7 @@ class MistConnection:
                 type='gateway',
                 limit=1000
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if device_response.status_code != 200:
                 raise Exception(f"API error getting device stats: {device_response.status_code}")
@@ -635,7 +635,7 @@ class MistConnection:
                 self.org_id,  # type: ignore[arg-type]
                 **port_params  # type: ignore[arg-type]
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if port_response.status_code == 200:
                 # Use get_all to handle pagination automatically
@@ -772,7 +772,7 @@ class MistConnection:
                             mac=gw_mac,
                             stats=True
                         )
-                        time.sleep(API_DELAY_SECONDS)
+                        time.sleep(self.API_DELAY_SECONDS)
                         
                         if device_search_response.status_code == 200:
                             search_results = device_search_response.data.get('results', [])
@@ -907,7 +907,7 @@ class MistConnection:
                         'port_id': port_id,
                         'wan_name': port_config.get('name', ''),
                         'description': port_config.get('description', port.get('port_desc', '')),
-                        'enabled': port.get('up', False) and not port_config.get('disabled', False),
+                        'enabled': not port_config.get('disabled', False),  # Admin status from config
                         'usage': 'wan',
                         'ip': ip_addr,
                         'netmask': netmask,
@@ -999,7 +999,7 @@ class MistConnection:
                         'name': base_port_name,
                         'wan_name': cfg.get('name', ''),
                         'description': cfg.get('description', ''),
-                        'enabled': physical_up and not cfg.get('disabled', False),
+                        'enabled': not cfg.get('disabled', False),  # Admin status from config
                         'usage': 'wan',
                         'ip': ip_addr,
                         'netmask': netmask,
@@ -1062,7 +1062,7 @@ class MistConnection:
                 type='gateway',
                 mac=gateway_id
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if response.status_code == 200:
                 gw = response.data
@@ -1119,7 +1119,7 @@ class MistConnection:
                 site_id=site_id,
                 mac=device_mac
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if response.status_code == 429:
                 # Rate limited - report to Redis and return gracefully
@@ -1225,7 +1225,7 @@ class MistConnection:
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=30)
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if response.status_code == 200:
                 data = response.json()
@@ -1304,7 +1304,7 @@ class MistConnection:
                 type='gateway',
                 limit=1000
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if device_response.status_code != 200:
                 raise Exception(f"API error getting device stats: {device_response.status_code}")
@@ -1354,7 +1354,7 @@ class MistConnection:
                 self.org_id,
                 **port_params
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if port_response.status_code != 200:
                 raise Exception(f"API error getting port stats: {port_response.status_code}")
@@ -1395,7 +1395,7 @@ class MistConnection:
                         self.org_id,
                         **port_params
                     )
-                    time.sleep(API_DELAY_SECONDS)
+                    time.sleep(self.API_DELAY_SECONDS)
                 else:
                     break
             
@@ -1430,7 +1430,7 @@ class MistConnection:
                 type='gateway',
                 limit=1000
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if port_response.status_code != 200:
                 raise Exception(f"API error getting port stats: {port_response.status_code}")
@@ -1482,7 +1482,7 @@ class MistConnection:
                 device_type='gateway',
                 limit=1000
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if port_response.status_code != 200:
                 logger.warning(f"API error getting port stats for site {site_id}: {port_response.status_code}")
@@ -1594,7 +1594,7 @@ class MistConnection:
                 mac=gw_mac,
                 stats=True
             )
-            time.sleep(API_DELAY_SECONDS)
+            time.sleep(self.API_DELAY_SECONDS)
             
             if device_search_response.status_code == 200:
                 search_results = device_search_response.data.get('results', [])
@@ -1701,7 +1701,7 @@ class MistConnection:
                 'port_id': port_id,
                 'wan_name': port_config.get('name', '') if port_config else '',
                 'description': port_config.get('description', port_desc) if port_config else port_desc,
-                'enabled': port.get('up', False) and not (port_config.get('disabled', False) if port_config else False),
+                'enabled': not (port_config.get('disabled', False) if port_config else False),  # Admin status from config
                 'usage': 'wan',
                 'ip': ip_addr,
                 'netmask': netmask,
@@ -1744,7 +1744,7 @@ class MistConnection:
                 'port_id': port_id,
                 'wan_name': '',
                 'description': port.get('port_desc', ''),
-                'enabled': port.get('up', False),
+                'enabled': True,  # Assume enabled when no config available
                 'usage': 'wan',
                 'ip': '',
                 'netmask': '',

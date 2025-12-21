@@ -1428,7 +1428,10 @@
                                 // 4. Compare: if runtime type differs from template type, it's an override
                                 const isOverride = runtimeType && templateType && (runtimeType !== templateType);
                                 
-                                const isEnabled = port.enabled !== undefined ? port.enabled : (port.up || false);
+                                // Enablement = admin status from config (NOT disabled)
+                                // Physical Status = link status (up/down)
+                                const isEnabled = port.enabled !== undefined ? port.enabled : true;  // Default to enabled
+                                const isUp = port.up || false;  // Physical link status
                                 
                                 // Use gateway from backend (already merged from device override + template)
                                 const gatewayIP = port.gateway || '-';

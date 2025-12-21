@@ -755,59 +755,218 @@ class DataWorker:
             # Fall back to sequential
             self._fetch_vpn_peers(gateways)
     
+    def _analyze_port_data_needs(self, gw_id: str, port_id: str) -> dict:
+        """
+        Analyze existing cached data to determine what needs to be fetched.
+        
+        Returns dict with:
+            - has_data: bool - whether any data exists
+            - first_ts: int - earliest timestamp in cache
+            - last_ts: int - latest timestamp in cache  
+            - data_span_days: float - how many days of data we have
+            - gap_at_start: int - seconds of missing data at start (older than our data)
+            - gap_at_end: int - seconds of missing data at end (newer than our data)
+            - priority: int - fetch priority (lower = higher priority)
+                1 = no data (highest priority)
+                2 = gaps at end (missing recent data)
+                3 = less than 7 days of data
+                4 = has 7 days (lowest priority, just refresh recent)
+        """
+        now = int(time.time())
+        target_days = 7
+        target_start = now - (target_days * 24 * 60 * 60)
+        
+        existing = self.cache.get_insights(gw_id, port_id)
+        
+        if not existing or not existing.get('timestamps'):
+            return {
+                'has_data': False,
+                'first_ts': 0,
+                'last_ts': 0,
+                'data_span_days': 0,
+                'gap_at_start': target_days * 24 * 60 * 60,
+                'gap_at_end': 0,
+                'priority': 1,  # Highest priority - no data at all
+                'fetch_start': target_start,
+                'fetch_end': now
+            }
+        
+        timestamps = existing.get('timestamps', [])
+        first_ts = min(ts for ts in timestamps if ts) if timestamps else 0
+        last_ts = max(ts for ts in timestamps if ts) if timestamps else 0
+        
+        data_span = (last_ts - first_ts) if (last_ts and first_ts) else 0
+        data_span_days = data_span / (24 * 60 * 60)
+        
+        # Gap at start: how much older data we're missing
+        gap_at_start = max(0, first_ts - target_start) if first_ts else target_days * 24 * 60 * 60
+        
+        # Gap at end: how much recent data we're missing (data older than 15 min is stale)
+        stale_threshold = 15 * 60  # 15 minutes
+        gap_at_end = max(0, now - last_ts - stale_threshold) if last_ts else 0
+        
+        # Determine priority
+        if gap_at_end > 60 * 60:  # More than 1 hour of missing recent data
+            priority = 2
+            fetch_start = last_ts  # Fetch from where we left off
+            fetch_end = now
+        elif data_span_days < 6.5:  # Less than ~7 days
+            priority = 3
+            # Fetch older data to fill gap at start
+            fetch_start = target_start
+            fetch_end = first_ts if first_ts else now
+        else:
+            priority = 4  # Have good coverage, just refresh recent
+            fetch_start = now - (24 * 60 * 60)  # Last 24 hours
+            fetch_end = now
+        
+        return {
+            'has_data': True,
+            'first_ts': first_ts,
+            'last_ts': last_ts,
+            'data_span_days': data_span_days,
+            'gap_at_start': gap_at_start,
+            'gap_at_end': gap_at_end,
+            'priority': priority,
+            'fetch_start': fetch_start,
+            'fetch_end': fetch_end
+        }
+    
+    def _merge_insights(self, existing: dict, new_data: dict) -> dict:
+        """
+        Merge new insights data with existing cached data.
+        Combines timestamps and corresponding rx_bps/tx_bps values,
+        removes duplicates, and sorts by timestamp.
+        """
+        if not existing or not existing.get('timestamps'):
+            return new_data
+        
+        if not new_data or not new_data.get('timestamps'):
+            return existing
+        
+        # Combine all data points
+        combined = {}
+        
+        # Add existing data
+        for i, ts in enumerate(existing.get('timestamps', [])):
+            if ts:
+                combined[ts] = {
+                    'rx_bps': existing.get('rx_bps', [])[i] if i < len(existing.get('rx_bps', [])) else 0,
+                    'tx_bps': existing.get('tx_bps', [])[i] if i < len(existing.get('tx_bps', [])) else 0
+                }
+        
+        # Add/update with new data (new data takes precedence for same timestamp)
+        for i, ts in enumerate(new_data.get('timestamps', [])):
+            if ts:
+                combined[ts] = {
+                    'rx_bps': new_data.get('rx_bps', [])[i] if i < len(new_data.get('rx_bps', [])) else 0,
+                    'tx_bps': new_data.get('tx_bps', [])[i] if i < len(new_data.get('tx_bps', [])) else 0
+                }
+        
+        # Sort by timestamp and rebuild arrays
+        sorted_timestamps = sorted(combined.keys())
+        
+        result = {
+            'timestamps': sorted_timestamps,
+            'rx_bps': [combined[ts]['rx_bps'] for ts in sorted_timestamps],
+            'tx_bps': [combined[ts]['tx_bps'] for ts in sorted_timestamps],
+            'interval': new_data.get('interval', existing.get('interval', 600))
+        }
+        
+        # Recalculate bytes
+        interval = result['interval']
+        result['rx_bytes'] = sum(bps * interval for bps in result['rx_bps'] if bps) // 8
+        result['tx_bytes'] = sum(bps * interval for bps in result['tx_bps'] if bps) // 8
+        
+        return result
+    
     def _fetch_insights_parallel(self, gateways: list):
         """
         Fetch traffic insights in parallel using thread pool.
+        
+        Smart fetching strategy:
+        1. Analyze each port's existing data to identify gaps
+        2. Prioritize ports with no data or missing recent data
+        3. Merge new data with existing data to build up history
+        4. Over multiple refresh cycles, build up to 7 days of data
         """
         try:
             import requests
             
-            end = int(time.time())
-            start = end - (7 * 24 * 60 * 60)  # 7 days
+            now = int(time.time())
             interval = 600  # 10-minute resolution for granular data
             
             all_insights = {}
-            total_ports = sum(len(gw.get('ports', [])) for gw in gateways if gw.get('ports'))
             processed = [0]
             
-            def fetch_port_insights(gw, port):
+            # Build list of (gateway, port) tuples with their data needs
+            tasks = []
+            for gw in gateways:
+                gw_id = gw.get('id')
+                for port in gw.get('ports', []):
+                    port_usage = port.get('port_usage') or port.get('usage', '')
+                    if port_usage == 'wan':
+                        port_id = port.get('port_id')
+                        if gw_id and port_id:
+                            data_needs = self._analyze_port_data_needs(gw_id, port_id)
+                            tasks.append((gw, port, data_needs))
+            
+            # Sort by priority (lower = higher priority)
+            tasks.sort(key=lambda x: x[2]['priority'])
+            
+            # Log distribution
+            priority_counts = {1: 0, 2: 0, 3: 0, 4: 0}
+            for _, _, needs in tasks:
+                priority_counts[needs['priority']] = priority_counts.get(needs['priority'], 0) + 1
+            
+            logger.info(f"Insights fetch priorities: "
+                       f"P1(no data)={priority_counts[1]}, "
+                       f"P2(missing recent)={priority_counts[2]}, "
+                       f"P3(<7 days)={priority_counts[3]}, "
+                       f"P4(refresh)={priority_counts[4]}")
+            
+            def fetch_port_insights(gw, port, data_needs):
                 site_id = gw.get('site_id')
                 port_id = port.get('port_id')
                 gw_id = gw.get('id')
                 if not all([site_id, port_id, gw_id]):
                     return None
                 try:
-                    # Pass gateway_id (UUID), not MAC - the API uses device ID
-                    insights = self.mist._get_port_insights(site_id, gw_id, port_id, start, end, interval)
-                    return (gw_id, port_id, insights)
-                except Exception:
+                    fetch_start = data_needs['fetch_start']
+                    fetch_end = data_needs['fetch_end']
+                    
+                    # Fetch from Mist API
+                    new_insights = self.mist._get_port_insights(site_id, gw_id, port_id, 
+                                                                 fetch_start, fetch_end, interval)
+                    
+                    if new_insights:
+                        # Get existing data and merge
+                        existing = self.cache.get_insights(gw_id, port_id)
+                        merged = self._merge_insights(existing, new_insights)
+                        return (gw_id, port_id, merged, data_needs['priority'])
+                    
                     return None
-            
-            # Build list of (gateway, port) tuples to process
-            # Use port_usage or usage field - both indicate WAN ports
-            tasks = []
-            for gw in gateways:
-                for port in gw.get('ports', []):
-                    port_usage = port.get('port_usage') or port.get('usage', '')
-                    if port_usage == 'wan':
-                        tasks.append((gw, port))
+                except Exception as e:
+                    logger.debug(f"Error fetching insights for {gw_id}/{port_id}: {e}")
+                    return None
             
             logger.info(f"Fetching insights for {len(tasks)} WAN ports in parallel ({self.parallel_workers} workers)...")
             
             with ThreadPoolExecutor(max_workers=self.parallel_workers) as executor:
-                futures = {executor.submit(fetch_port_insights, gw, port): (gw, port) for gw, port in tasks}
+                futures = {executor.submit(fetch_port_insights, gw, port, needs): (gw, port) 
+                          for gw, port, needs in tasks}
                 
                 for future in as_completed(futures):
                     processed[0] += 1
                     result = future.result()
                     if result:
-                        gw_id, port_id, insights = result
-                        if insights:
+                        gw_id, port_id, merged_insights, priority = result
+                        if merged_insights:
                             if gw_id not in all_insights:
                                 all_insights[gw_id] = {}
-                            all_insights[gw_id][port_id] = insights
+                            all_insights[gw_id][port_id] = merged_insights
                             # Store individual insight immediately so charts work during fetch
-                            self.cache.set_insights(gw_id, port_id, insights, ttl=self.cache_ttl)
+                            self.cache.set_insights(gw_id, port_id, merged_insights, ttl=self.cache_ttl)
                     
                     if processed[0] % 100 == 0:
                         self.cache.set_loading_phase('insights', 5, {
