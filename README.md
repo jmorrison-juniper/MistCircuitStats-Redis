@@ -80,6 +80,11 @@ Open http://localhost:5000 in your browser.
 | `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
 | `WORKER_INTERVAL` | Data refresh interval in seconds | `300` (5 min) |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
+| `SKIP_ENRICHMENT` | Skip VPN peers and insights for faster load | `false` |
+| `PARALLEL_WORKERS` | Number of parallel threads for fetching | `5` |
+| `USE_CACHED_ON_STARTUP` | Use cached data on startup if valid | `true` |
+| `INCREMENTAL_REFRESH` | Skip refresh if cache is still fresh | `true` |
+| `STALE_THRESHOLD` | Seconds before cache is considered stale | `600` |
 
 ### Multiple API Tokens
 
@@ -159,13 +164,17 @@ volumes:
 | Endpoint | Description |
 |----------|-------------|
 | `GET /` | Dashboard HTML |
+| `GET /health` | Health check endpoint |
 | `GET /api/status` | Cache and worker status |
 | `GET /api/organization` | Organization info |
 | `GET /api/sites` | Sites list |
 | `GET /api/gateways` | All gateway data |
+| `GET /api/templates` | Gateway templates |
 | `GET /api/vpn-peers/all` | All VPN peer paths |
 | `GET /api/insights/all` | All traffic insights |
+| `GET /api/cache-stats` | Cache statistics |
 | `GET /api/token-status` | Worker/cache status |
+| `GET /api/gateway/<id>/port/<port>/traffic` | Port traffic time-series |
 
 ### Mist API Endpoints (used by worker)
 
@@ -176,10 +185,10 @@ volumes:
 | `mistapi.api.v1.orgs.sites.listOrgSites` | GET | List all sites in organization |
 | `mistapi.api.v1.orgs.stats.listOrgDevicesStats` | GET | List gateway device statistics (type=gateway) |
 | `mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts` | GET | Search WAN port statistics (paginated) |
-| `/api/v1/orgs/{org_id}/stats/vpn_peers/search` | GET | VPN peer path statistics (per device) |
+| `mistapi.api.v1.orgs.stats.searchOrgPeerPathStats` | GET | VPN peer path statistics (per device) |
 | `/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats` | GET | Port-specific time-series traffic data |
 
-> **Note**: VPN peers and Insights use direct HTTP requests due to SDK limitations. Time-series charts use the Mist Insights API with parameters: `port_id`, `start`, `end`, `interval`, `metrics=rx_bps,tx_bps`
+> **Note**: Gateway insights uses direct HTTP requests as the SDK doesn't support it yet. Time-series charts use the Mist Insights API with parameters: `port_id`, `start`, `end`, `interval`, `metrics=rx_bps,tx_bps`
 
 ## License
 
