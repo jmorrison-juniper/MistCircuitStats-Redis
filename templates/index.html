@@ -420,6 +420,93 @@
             transform: scale(1.1);
             box-shadow: 0 0 10px rgba(226, 0, 116, 0.5);
         }
+        
+        /* Worker Status Card */
+        .worker-status-card {
+            background-color: #252525;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+        }
+        
+        .worker-status-card .status-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+        }
+        
+        .worker-status-card .status-title {
+            font-weight: 600;
+            font-size: 0.85rem;
+            color: #e0e0e0;
+        }
+        
+        .worker-status-badge {
+            font-size: 0.7rem;
+            padding: 0.25em 0.5em;
+        }
+        
+        .worker-status-badge.running {
+            background-color: var(--tmobile-magenta);
+            animation: pulse 1.5s infinite;
+        }
+        
+        .worker-status-badge.idle {
+            background-color: #6c757d;
+        }
+        
+        .worker-status-badge.error {
+            background-color: #dc3545;
+        }
+        
+        .worker-phase-progress {
+            height: 4px;
+            background-color: #404040;
+            border-radius: 2px;
+            margin-bottom: 0.5rem;
+            overflow: hidden;
+        }
+        
+        .worker-phase-progress .progress-bar {
+            background-color: var(--tmobile-magenta);
+            transition: width 0.3s ease;
+        }
+        
+        .worker-phase-details {
+            font-size: 0.75rem;
+            color: #a0a0a0;
+        }
+        
+        .worker-phase-details .phase-name {
+            color: var(--tmobile-magenta);
+            font-weight: 600;
+        }
+        
+        .worker-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+        }
+        
+        .worker-stat-item {
+            text-align: center;
+            padding: 0.25rem;
+            background-color: #2d2d2d;
+            border-radius: 4px;
+        }
+        
+        .worker-stat-item .stat-value {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--tmobile-magenta);
+        }
+        
+        .worker-stat-item .stat-label {
+            font-size: 0.65rem;
+            color: #888;
+        }
     </style>
 </head>
 <body>
@@ -530,6 +617,47 @@
                 <div class="card stats-card">
                     <div class="stats-value" id="templatesCount">-</div>
                     <div class="stats-label">Templates</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Worker Status Card -->
+        <div class="row mb-2">
+            <div class="col-12">
+                <div class="worker-status-card">
+                    <div class="status-header">
+                        <div class="d-flex align-items-center">
+                            <span class="status-title me-2"><i class="bi bi-gear-fill"></i> Worker Status</span>
+                            <span class="badge worker-status-badge idle" id="workerStatusBadge">Idle</span>
+                        </div>
+                        <span class="small text-muted" id="lastUpdateTime">Last update: --</span>
+                    </div>
+                    <div class="worker-phase-progress">
+                        <div class="progress-bar" id="workerPhaseProgress" style="width: 0%"></div>
+                    </div>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div class="worker-phase-details">
+                            <span id="workerPhaseText">Waiting for status...</span>
+                        </div>
+                        <div class="worker-stats-grid" style="max-width: 500px;">
+                            <div class="worker-stat-item">
+                                <div class="stat-value" id="workerGatewaysLoaded">-</div>
+                                <div class="stat-label">Gateways</div>
+                            </div>
+                            <div class="worker-stat-item">
+                                <div class="stat-value" id="workerVpnPeersLoaded">-</div>
+                                <div class="stat-label">VPN Peers</div>
+                            </div>
+                            <div class="worker-stat-item">
+                                <div class="stat-value" id="workerPortsLoaded">-</div>
+                                <div class="stat-label">Ports</div>
+                            </div>
+                            <div class="worker-stat-item">
+                                <div class="stat-value" id="workerInsightsLoaded">-</div>
+                                <div class="stat-label">Insights</div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -960,10 +1088,68 @@
             // Refresh cache stats every 30 seconds
             setInterval(loadCacheStats, 30000);
             
+            // Load and refresh worker status every 5 seconds
+            loadWorkerStatus();
+            setInterval(loadWorkerStatus, 5000);
+            
             // Setup search
             document.getElementById('searchInput').addEventListener('input', filterGateways);
             document.getElementById('siteFilter').addEventListener('change', filterGateways);
         });
+        
+        async function loadWorkerStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                if (data.success && data.data) {
+                    const { loading_phase, stats, cache_valid } = data.data;
+                    
+                    // Update worker status badge
+                    const statusBadge = document.getElementById('workerStatusBadge');
+                    const workerStatus = stats?.worker_status?.status || 'idle';
+                    statusBadge.textContent = workerStatus.charAt(0).toUpperCase() + workerStatus.slice(1);
+                    statusBadge.className = `badge worker-status-badge ${workerStatus}`;
+                    
+                    // Update last update time
+                    if (stats?.last_update) {
+                        const lastUpdate = new Date(stats.last_update * 1000);
+                        document.getElementById('lastUpdateTime').textContent = 
+                            `Last update: ${lastUpdate.toLocaleTimeString()}`;
+                    }
+                    
+                    // Update phase progress
+                    const phaseProgress = document.getElementById('workerPhaseProgress');
+                    const phaseText = document.getElementById('workerPhaseText');
+                    
+                    if (loading_phase) {
+                        const phaseOrder = ['org_sites', 'gateways', 'vpn_peers', 'ports', 'insights', 'complete'];
+                        const currentPhaseIndex = phaseOrder.indexOf(loading_phase.current_phase);
+                        const progressPercent = ((currentPhaseIndex + 1) / phaseOrder.length) * 100;
+                        phaseProgress.style.width = `${progressPercent}%`;
+                        
+                        const phaseName = loading_phase.current_phase || 'unknown';
+                        const description = loading_phase.details?.description || '';
+                        phaseText.innerHTML = `Phase: <span class="phase-name">${phaseName}</span> - ${description}`;
+                    } else {
+                        phaseProgress.style.width = cache_valid ? '100%' : '0%';
+                        phaseText.textContent = cache_valid ? 'Cache ready' : 'Waiting for data...';
+                    }
+                    
+                    // Update worker stats grid
+                    document.getElementById('workerGatewaysLoaded').textContent = 
+                        stats?.gateways_count?.toLocaleString() || '-';
+                    document.getElementById('workerVpnPeersLoaded').textContent = 
+                        stats?.vpn_peers_count?.toLocaleString() || '-';
+                    document.getElementById('workerPortsLoaded').textContent = 
+                        stats?.total_ports?.toLocaleString() || '-';
+                    document.getElementById('workerInsightsLoaded').textContent = 
+                        stats?.insights_count?.toLocaleString() || '-';
+                }
+            } catch (error) {
+                console.error('Error loading worker status:', error);
+            }
+        }
         
         async function loadCacheStats() {
             try {
@@ -1538,7 +1724,8 @@
                 
                 // Get peer paths from cache
                 const cacheKey = `${gateway.id}-${gateway.mac}`;
-                const peersByPort = vpnPeerCache[cacheKey] || {};
+                const peerData = vpnPeerCache[cacheKey] || {};
+                const peersByPort = peerData.peers_by_port || peerData || {};
                 
                 if (gateway.ports && gateway.ports.length > 0) {
                     gateway.ports.forEach(port => {
@@ -1616,7 +1803,7 @@
                         status,
                         ipAddress,
                         uptime,
-                        '', '', '', '', '', '', '', '', '', '', '', '', '-', 0, 0
+                        '', '', '', '', '', '', '', '', '', '', '', '-', 0, 0
                     ]);
                 }
             });
