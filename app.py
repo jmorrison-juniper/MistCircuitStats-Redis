@@ -194,67 +194,65 @@ def api_all_insights():
 def api_port_traffic(gateway_id, port_id):
     """Get traffic time-series for chart display.
     
+    Multi-resolution support: Returns data at the appropriate resolution based on duration.
+    
     Query parameters:
-        duration: Time range to return - '1h', '6h', '1d', '7d', '30d' (default: all data)
-        start: Unix timestamp for start of range (alternative to duration)
-        end: Unix timestamp for end of range (default: now)
+        duration: Time range to return - '1h', '6h', '1d', '7d' (default: '7d')
+                  Each duration returns data at the optimal resolution for that timeframe.
+    
+    Resolution mapping:
+        - 1h: 1-minute intervals (~60 points)
+        - 6h: 2-minute intervals (~180 points)
+        - 1d: 10-minute intervals (~144 points)
+        - 7d: 1-hour intervals (~168 points)
     """
     try:
         from urllib.parse import unquote
         import time
         
         port_id = unquote(port_id)
+        duration = request.args.get('duration', '7d')
+        
+        # Map duration to resolution key
+        resolution_map = {
+            '1h': '1h',
+            '6h': '6h',
+            '1d': '1d',
+            '24h': '1d',  # Alias
+            '7d': '7d',
+            '30d': '7d'   # Use 7d resolution for 30d requests (filter client-side if needed)
+        }
+        resolution = resolution_map.get(duration, '7d')
         
         c = get_cache()
-        insights = c.get_insights(gateway_id, port_id)
+        
+        # Try to get resolution-specific data first
+        insights = c.get_insights_by_resolution(gateway_id, port_id, resolution)
+        
+        # Fall back to default insights if resolution-specific not available
+        if not insights:
+            insights = c.get_insights(gateway_id, port_id)
         
         if not insights:
             return jsonify({
                 'success': True, 
-                'data': {'timestamps': [], 'rx_bps': [], 'tx_bps': [], 'rx_bytes': 0, 'tx_bytes': 0}
+                'data': {
+                    'timestamps': [], 
+                    'rx_bps': [], 
+                    'tx_bps': [], 
+                    'rx_bytes': 0, 
+                    'tx_bytes': 0,
+                    'resolution': resolution,
+                    'interval': 0
+                }
             })
         
         timestamps = insights.get('timestamps', [])
         rx_bps = insights.get('rx_bps', [])
         tx_bps = insights.get('tx_bps', [])
-        
-        # Parse time range parameters
-        duration = request.args.get('duration')
-        start_ts = request.args.get('start', type=int)
-        end_ts = request.args.get('end', type=int, default=int(time.time()))
-        
-        # Convert duration to start timestamp
-        if duration and not start_ts:
-            duration_seconds = {
-                '1h': 60 * 60,
-                '6h': 6 * 60 * 60,
-                '1d': 24 * 60 * 60,
-                '7d': 7 * 24 * 60 * 60,
-                '30d': 30 * 24 * 60 * 60
-            }
-            if duration in duration_seconds:
-                start_ts = end_ts - duration_seconds[duration]
-        
-        # Filter data if time range specified
-        if start_ts:
-            filtered_timestamps = []
-            filtered_rx = []
-            filtered_tx = []
-            
-            for i, ts in enumerate(timestamps):
-                if ts and start_ts <= ts <= end_ts:
-                    filtered_timestamps.append(ts)
-                    filtered_rx.append(rx_bps[i] if i < len(rx_bps) else 0)
-                    filtered_tx.append(tx_bps[i] if i < len(tx_bps) else 0)
-            
-            timestamps = filtered_timestamps
-            rx_bps = filtered_rx
-            tx_bps = filtered_tx
-        
-        # Recalculate bytes for filtered range (assuming 10-min intervals = 600s)
-        interval = 600
-        rx_bytes = sum(bps * interval for bps in rx_bps if bps) // 8
-        tx_bytes = sum(bps * interval for bps in tx_bps if bps) // 8
+        interval = insights.get('interval', 600)
+        rx_bytes = insights.get('rx_bytes', 0)
+        tx_bytes = insights.get('tx_bytes', 0)
         
         return jsonify({
             'success': True,
@@ -263,7 +261,9 @@ def api_port_traffic(gateway_id, port_id):
                 'rx_bps': rx_bps,
                 'tx_bps': tx_bps,
                 'rx_bytes': rx_bytes,
-                'tx_bytes': tx_bytes
+                'tx_bytes': tx_bytes,
+                'resolution': resolution,
+                'interval': interval
             }
         })
     except Exception as e:

@@ -27,6 +27,15 @@ class RedisCache:
     PREFIX_INSIGHTS = "mist:insights"
     PREFIX_METADATA = "mist:metadata"
     
+    # Multi-resolution insight keys
+    # Each resolution stores the same ~168 data points at different intervals
+    INSIGHT_RESOLUTIONS = {
+        '1h': {'seconds': 3600, 'interval': 60},      # 1 hour, 1-min intervals (~60 points)
+        '6h': {'seconds': 21600, 'interval': 120},   # 6 hours, 2-min intervals (~180 points)
+        '1d': {'seconds': 86400, 'interval': 600},   # 24 hours, 10-min intervals (~144 points)
+        '7d': {'seconds': 604800, 'interval': 3600}  # 7 days, 1-hour intervals (~168 points)
+    }
+    
     # Default TTL (15 minutes)
     DEFAULT_TTL = 900
     
@@ -431,6 +440,85 @@ class RedisCache:
         except Exception as e:
             logger.error(f"Error retrieving all insights: {e}")
             return {}
+    
+    # ==================== Multi-Resolution Insights ====================
+    
+    def set_insights_by_resolution(self, gateway_id: str, port_id: str, resolution: str, 
+                                    insights: dict[str, Any], ttl: Optional[int] = None) -> bool:
+        """
+        Store traffic insights for a port at a specific resolution.
+        
+        Args:
+            gateway_id: Gateway ID
+            port_id: Port identifier
+            resolution: Resolution key ('1h', '6h', '1d', '7d')
+            insights: Insights data dict with timestamps, rx_bps, tx_bps, etc.
+            ttl: Time-to-live in seconds
+        """
+        try:
+            if resolution not in self.INSIGHT_RESOLUTIONS:
+                logger.warning(f"Invalid resolution '{resolution}', using '7d'")
+                resolution = '7d'
+            
+            key = f"{self.PREFIX_INSIGHTS}:{gateway_id}:{port_id}:{resolution}"
+            self.client.setex(
+                key,
+                ttl or self.DEFAULT_TTL,
+                self._serialize(insights)
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error storing insights for {gateway_id}/{port_id}/{resolution}: {e}")
+            return False
+    
+    def get_insights_by_resolution(self, gateway_id: str, port_id: str, 
+                                    resolution: str = '7d') -> Optional[dict[str, Any]]:
+        """
+        Retrieve traffic insights for a port at a specific resolution.
+        
+        Args:
+            gateway_id: Gateway ID
+            port_id: Port identifier
+            resolution: Resolution key ('1h', '6h', '1d', '7d')
+            
+        Returns:
+            Insights data dict or None if not found
+        """
+        try:
+            if resolution not in self.INSIGHT_RESOLUTIONS:
+                resolution = '7d'
+            
+            key = f"{self.PREFIX_INSIGHTS}:{gateway_id}:{port_id}:{resolution}"
+            data = self.client.get(key)
+            return self._deserialize(data)
+        except Exception as e:
+            logger.error(f"Error retrieving insights for {gateway_id}/{port_id}/{resolution}: {e}")
+            return None
+    
+    def set_all_insights_multi_resolution(self, all_insights: dict[str, dict[str, dict[str, dict[str, Any]]]], 
+                                           ttl: Optional[int] = None) -> bool:
+        """
+        Store all insights for all resolutions in a single operation.
+        
+        Args:
+            all_insights: Dict of gateway_id -> {port_id -> {resolution -> insights_data}}
+        """
+        try:
+            pipe = self.client.pipeline()
+            count = 0
+            for gateway_id, ports in all_insights.items():
+                for port_id, resolutions in ports.items():
+                    for resolution, insights in resolutions.items():
+                        if resolution in self.INSIGHT_RESOLUTIONS:
+                            key = f"{self.PREFIX_INSIGHTS}:{gateway_id}:{port_id}:{resolution}"
+                            pipe.setex(key, ttl or self.DEFAULT_TTL, self._serialize(insights))
+                            count += 1
+            pipe.execute()
+            logger.info(f"Stored multi-resolution insights: {count} entries")
+            return True
+        except Exception as e:
+            logger.error(f"Error storing multi-resolution insights: {e}")
+            return False
     
     # ==================== Metadata ====================
     

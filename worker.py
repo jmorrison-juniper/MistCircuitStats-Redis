@@ -884,106 +884,159 @@ class DataWorker:
         """
         Fetch traffic insights in parallel using thread pool.
         
-        Smart fetching strategy:
-        1. Analyze each port's existing data to identify gaps
-        2. Prioritize ports with no data or missing recent data
-        3. Merge new data with existing data to build up history
-        4. Over multiple refresh cycles, build up to 7 days of data
+        Multi-resolution strategy:
+        1. For each WAN port, fetch 4 different timeframes in parallel
+        2. Each resolution provides ~similar data point count at different intervals
+        3. Filter out null/zero values before storing
+        4. Store each resolution separately for efficient retrieval
+        
+        Resolutions:
+        - 1h: 1-minute intervals (~60 points)
+        - 6h: 2-minute intervals (~180 points)  
+        - 1d: 10-minute intervals (~144 points)
+        - 7d: 1-hour intervals (~168 points)
         """
         try:
             import requests
+            from redis_cache import RedisCache
             
             now = int(time.time())
-            interval = 600  # 10-minute resolution for granular data
+            
+            # Resolution configurations
+            resolutions = {
+                '1h': {'seconds': 3600, 'interval': 60},       # 1 hour, 1-min intervals
+                '6h': {'seconds': 21600, 'interval': 120},    # 6 hours, 2-min intervals
+                '1d': {'seconds': 86400, 'interval': 600},    # 24 hours, 10-min intervals
+                '7d': {'seconds': 604800, 'interval': 3600}   # 7 days, 1-hour intervals
+            }
             
             all_insights = {}
             processed = [0]
             
-            # Build list of (gateway, port) tuples with their data needs
-            tasks = []
+            # Build list of WAN ports
+            wan_ports = []
             for gw in gateways:
                 gw_id = gw.get('id')
+                site_id = gw.get('site_id')
                 for port in gw.get('ports', []):
                     port_usage = port.get('port_usage') or port.get('usage', '')
                     if port_usage == 'wan':
                         port_id = port.get('port_id')
-                        if gw_id and port_id:
-                            data_needs = self._analyze_port_data_needs(gw_id, port_id)
-                            tasks.append((gw, port, data_needs))
+                        if gw_id and port_id and site_id:
+                            wan_ports.append((gw_id, site_id, port_id))
             
-            # Sort by priority (lower = higher priority)
-            tasks.sort(key=lambda x: x[2]['priority'])
+            total_requests = len(wan_ports) * len(resolutions)
+            logger.info(f"Fetching multi-resolution insights for {len(wan_ports)} WAN ports "
+                       f"({len(resolutions)} resolutions each = {total_requests} API calls)")
             
-            # Log distribution
-            priority_counts = {1: 0, 2: 0, 3: 0, 4: 0}
-            for _, _, needs in tasks:
-                priority_counts[needs['priority']] = priority_counts.get(needs['priority'], 0) + 1
-            
-            logger.info(f"Insights fetch priorities: "
-                       f"P1(no data)={priority_counts[1]}, "
-                       f"P2(missing recent)={priority_counts[2]}, "
-                       f"P3(<7 days)={priority_counts[3]}, "
-                       f"P4(refresh)={priority_counts[4]}")
-            
-            def fetch_port_insights(gw, port, data_needs):
-                site_id = gw.get('site_id')
-                port_id = port.get('port_id')
-                gw_id = gw.get('id')
-                if not all([site_id, port_id, gw_id]):
-                    return None
-                try:
-                    fetch_start = data_needs['fetch_start']
-                    fetch_end = data_needs['fetch_end']
+            def filter_null_zero(insights: dict) -> dict:
+                """Filter out null and zero values from insights data."""
+                if not insights or not insights.get('timestamps'):
+                    return insights
+                
+                filtered_ts = []
+                filtered_rx = []
+                filtered_tx = []
+                
+                timestamps = insights.get('timestamps', [])
+                rx_bps = insights.get('rx_bps', [])
+                tx_bps = insights.get('tx_bps', [])
+                
+                for i, ts in enumerate(timestamps):
+                    rx = rx_bps[i] if i < len(rx_bps) else 0
+                    tx = tx_bps[i] if i < len(tx_bps) else 0
                     
-                    # Fetch from Mist API
-                    new_insights = self.mist._get_port_insights(site_id, gw_id, port_id, 
-                                                                 fetch_start, fetch_end, interval)
-                    
-                    if new_insights:
-                        # Get existing data and merge
-                        existing = self.cache.get_insights(gw_id, port_id)
-                        merged = self._merge_insights(existing, new_insights)
-                        return (gw_id, port_id, merged, data_needs['priority'])
-                    
+                    # Keep only if at least one value is non-null and non-zero
+                    if ts and (rx or tx):
+                        filtered_ts.append(ts)
+                        filtered_rx.append(rx or 0)
+                        filtered_tx.append(tx or 0)
+                
+                if not filtered_ts:
                     return None
-                except Exception as e:
-                    logger.debug(f"Error fetching insights for {gw_id}/{port_id}: {e}")
-                    return None
+                
+                interval = insights.get('interval', 600)
+                return {
+                    'timestamps': filtered_ts,
+                    'rx_bps': filtered_rx,
+                    'tx_bps': filtered_tx,
+                    'rx_bytes': sum(bps * interval for bps in filtered_rx if bps) // 8,
+                    'tx_bytes': sum(bps * interval for bps in filtered_tx if bps) // 8,
+                    'interval': interval
+                }
             
-            logger.info(f"Fetching insights for {len(tasks)} WAN ports in parallel ({self.parallel_workers} workers)...")
+            def fetch_port_all_resolutions(gw_id: str, site_id: str, port_id: str):
+                """Fetch all resolutions for a single port."""
+                results = {}
+                
+                for res_key, res_config in resolutions.items():
+                    try:
+                        start = now - res_config['seconds']
+                        end = now
+                        interval = res_config['interval']
+                        
+                        insights = self.mist._get_port_insights(
+                            site_id, gw_id, port_id, start, end, interval
+                        )
+                        
+                        if insights:
+                            # Filter out null/zero values
+                            filtered = filter_null_zero(insights)
+                            if filtered:
+                                results[res_key] = filtered
+                    except Exception as e:
+                        logger.debug(f"Error fetching {res_key} for {gw_id}/{port_id}: {e}")
+                
+                return (gw_id, port_id, results) if results else None
+            
+            logger.info(f"Starting parallel fetch with {self.parallel_workers} workers...")
             
             with ThreadPoolExecutor(max_workers=self.parallel_workers) as executor:
-                futures = {executor.submit(fetch_port_insights, gw, port, needs): (gw, port) 
-                          for gw, port, needs in tasks}
+                futures = {
+                    executor.submit(fetch_port_all_resolutions, gw_id, site_id, port_id): (gw_id, port_id) 
+                    for gw_id, site_id, port_id in wan_ports
+                }
                 
                 for future in as_completed(futures):
                     processed[0] += 1
                     result = future.result()
-                    if result:
-                        gw_id, port_id, merged_insights, priority = result
-                        if merged_insights:
-                            if gw_id not in all_insights:
-                                all_insights[gw_id] = {}
-                            all_insights[gw_id][port_id] = merged_insights
-                            # Store individual insight immediately so charts work during fetch
-                            self.cache.set_insights(gw_id, port_id, merged_insights, ttl=self.cache_ttl)
                     
-                    if processed[0] % 100 == 0:
+                    if result:
+                        gw_id, port_id, port_resolutions = result
+                        
+                        # Store each resolution immediately
+                        for res_key, res_data in port_resolutions.items():
+                            self.cache.set_insights_by_resolution(
+                                gw_id, port_id, res_key, res_data, ttl=self.cache_ttl
+                            )
+                        
+                        # Also store 7d as the default (backward compatibility)
+                        if '7d' in port_resolutions:
+                            self.cache.set_insights(gw_id, port_id, port_resolutions['7d'], ttl=self.cache_ttl)
+                        
+                        # Track for bulk storage
+                        if gw_id not in all_insights:
+                            all_insights[gw_id] = {}
+                        all_insights[gw_id][port_id] = port_resolutions
+                    
+                    if processed[0] % 50 == 0:
                         self.cache.set_loading_phase('insights', 5, {
-                            'description': f'Insights: {processed[0]}/{len(tasks)} ports',
+                            'description': f'Multi-res insights: {processed[0]}/{len(wan_ports)} ports',
                             'progress': processed[0],
-                            'total': len(tasks)
+                            'total': len(wan_ports)
                         })
-                        logger.info(f"Insights progress: {processed[0]}/{len(tasks)}")
+                        logger.info(f"Insights progress: {processed[0]}/{len(wan_ports)} ports")
             
-            # Store all insights (backup/bulk storage)
-            if all_insights:
-                self.cache.set_all_insights(all_insights, ttl=self.cache_ttl)
-            
-            logger.info(f"Cached insights for {len(all_insights)} gateways (parallel)")
+            # Store summary
+            total_stored = sum(
+                len(resolutions) 
+                for ports in all_insights.values() 
+                for resolutions in ports.values()
+            )
+            logger.info(f"Cached multi-resolution insights: {len(wan_ports)} ports, {total_stored} total entries")
             
         except Exception as e:
-            logger.error(f"Parallel insights fetch failed: {e}")
+            logger.error(f"Parallel multi-resolution insights fetch failed: {e}")
 
 
 if __name__ == '__main__':
