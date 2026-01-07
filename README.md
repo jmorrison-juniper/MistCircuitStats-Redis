@@ -178,17 +178,42 @@ volumes:
 
 ### Mist API Endpoints (used by worker)
 
+#### Authentication & Self
+
 | API Endpoint | Method | Description |
 |--------------|--------|-------------|
-| `mistapi.api.v1.self.self.getSelf` | GET | Get current API token info and privileges |
-| `mistapi.api.v1.orgs.orgs.getOrg` | GET | Get organization details |
-| `mistapi.api.v1.orgs.sites.listOrgSites` | GET | List all sites in organization |
-| `mistapi.api.v1.orgs.stats.listOrgDevicesStats` | GET | List gateway device statistics (type=gateway) |
-| `mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts` | GET | Search WAN port statistics (paginated) |
-| `mistapi.api.v1.orgs.stats.searchOrgPeerPathStats` | GET | VPN peer path statistics (per device) |
-| `/api/v1/sites/{site_id}/insights/gateway/{device_id}/stats` | GET | Port-specific time-series traffic data |
+| `mistapi.api.v1.self.self.getSelf` | GET | Get current API token info and privileges (org auto-detection) |
+| `mistapi.api.v1.self.usage.getSelfApiUsage` | GET | Get API usage statistics for current token |
 
-> **Note**: Gateway insights uses direct HTTP requests as the SDK doesn't support it yet. Time-series charts use the Mist Insights API with parameters: `port_id`, `start`, `end`, `interval`, `metrics=rx_bps,tx_bps`
+#### Organization Level
+
+| API Endpoint | Method | Description |
+|--------------|--------|-------------|
+| `mistapi.api.v1.orgs.orgs.getOrg` | GET | Get organization details |
+| `mistapi.api.v1.orgs.sites.listOrgSites` | GET | List all sites in organization (paginated) |
+| `mistapi.api.v1.orgs.stats.listOrgDevicesStats` | GET | List gateway device statistics (type=gateway, paginated) |
+| `mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts` | GET | Search org-level WAN port statistics (type=gateway, paginated) |
+| `mistapi.api.v1.orgs.stats.searchOrgPeerPathStats` | GET | VPN peer path statistics per device |
+| `mistapi.api.v1.orgs.inventory.getOrgInventory` | GET | Get org device inventory (deviceprofile_id lookup, paginated) |
+| `mistapi.api.v1.orgs.deviceprofiles.getOrgDeviceProfile` | GET | Get device profile config (Hub devices) |
+| `mistapi.api.v1.orgs.gatewaytemplates.getOrgGatewayTemplate` | GET | Get gateway template config (Spoke/Branch devices) |
+| `mistapi.api.v1.orgs.devices.searchOrgDevices` | GET | Search org devices by type/MAC |
+
+#### Site Level
+
+| API Endpoint | Method | Description |
+|--------------|--------|-------------|
+| `mistapi.api.v1.sites.devices.getSiteDevice` | GET | Get device configuration (port_config, cached in Redis) |
+| `mistapi.api.v1.sites.devices.searchSiteDevices` | GET | Search site devices with stats=True (runtime IPs from if_stat) |
+| `mistapi.api.v1.sites.stats.searchSiteSwOrGwPorts` | GET | Search site-level port statistics (device_type=gateway) |
+
+#### Direct HTTP (SDK not supported)
+
+| API Endpoint | Method | Description |
+|--------------|--------|-------------|
+| `/api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats` | GET | Port traffic time-series (rx_bps, tx_bps) |
+
+> **Note**: The gateway insights endpoint uses direct HTTP requests as the mistapi SDK doesn't support it yet. Parameters: `port_id`, `start`, `end`, `interval`, `metrics=rx_bps,tx_bps`. Response includes `rt` (timestamps), `rx_bps`, and `tx_bps` arrays.
 
 ## License
 
