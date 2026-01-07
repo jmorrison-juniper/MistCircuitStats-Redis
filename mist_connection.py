@@ -597,7 +597,7 @@ class MistConnection:
         except Exception as e:
             logger.warning(f"Error fetching device configs for site {site_id}: {e}")
         
-        # 2. Fetch all gateway runtime stats for this site (1 API call)
+        # 2. Fetch all gateway runtime stats for this site (1 API call + pagination)
         try:
             response = mistapi.api.v1.sites.devices.searchSiteDevices(
                 self.apisession,
@@ -609,7 +609,8 @@ class MistConnection:
             time.sleep(self.API_DELAY_SECONDS)
             
             if response.status_code == 200:
-                devices = response.data.get('results', [])
+                # Use get_all to handle pagination for search endpoints
+                devices = mistapi.get_all(self.apisession, response)
                 for device in devices:
                     device_mac = device.get('mac')
                     if device_mac:
