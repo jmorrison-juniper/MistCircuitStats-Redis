@@ -147,6 +147,136 @@ MistCircuitStats-Redis/
 4. **Worker refreshes**: Every N seconds (default 5 min), worker updates cache
 5. **Cache expires**: If worker fails, data expires after 3x refresh interval
 
+## Worker Data Fetch Flow
+
+The worker uses parallel threads with dependency coordination to efficiently fetch data from the Mist API:
+
+```mermaid
+flowchart TB
+    subgraph INIT["🚀 Initialization"]
+        START([Worker Start]) --> CONNECT[Connect to Redis & Mist API]
+        CONNECT --> CHECK{Cache Valid?}
+        CHECK -->|Yes & Fresh| SKIP[Skip Refresh]
+        CHECK -->|No or Stale| PARALLEL
+    end
+
+    subgraph PARALLEL["⚡ Parallel Workers (ThreadPoolExecutor)"]
+        direction TB
+        
+        subgraph W1["Worker 1: Org & Sites"]
+            ORG[getSelf - Auto-detect Org] --> ORG_INFO[getOrg - Org Details]
+            ORG_INFO --> SITES[listOrgSites - All Sites]
+            SITES --> SITES_LOOP{More Pages?}
+            SITES_LOOP -->|Yes| SITES
+            SITES_LOOP -->|No| CACHE_SITES[(Cache Sites)]
+        end
+        
+        subgraph W2["Worker 2: Gateway List"]
+            GW_LIST[listOrgDevicesStats<br/>type=gateway] --> GW_PAGE{More Pages?}
+            GW_PAGE -->|Yes| GW_LIST
+            GW_PAGE -->|No| CACHE_GW[(Cache Gateways)]
+            CACHE_GW --> SIGNAL([🚦 Signal: gateways_ready])
+        end
+    end
+
+    subgraph DEPENDENT["🔗 Dependent Workers (wait for gateways_ready)"]
+        direction TB
+        
+        SIGNAL --> W3 & W4 & W5
+        
+        subgraph W3["Worker 3: Port Stats"]
+            SITE_LOOP[/"For each Site"/] --> SITE_PORTS[searchSiteSwOrGwPorts]
+            SITE_PORTS --> ENRICH
+            
+            subgraph ENRICH["Port Enrichment (per gateway)"]
+                INV[getOrgInventory<br/>deviceprofile_id lookup] --> PROFILE_CHECK{Hub Device?}
+                PROFILE_CHECK -->|Yes| DEV_PROFILE[getOrgDeviceProfile]
+                PROFILE_CHECK -->|No| GW_TEMPLATE[getOrgGatewayTemplate]
+                DEV_PROFILE & GW_TEMPLATE --> DEV_CONFIG[getSiteDevice<br/>port_config]
+                DEV_CONFIG --> RUNTIME[searchSiteDevices<br/>stats=True]
+                RUNTIME --> MERGE[Merge Config + Runtime IPs]
+            end
+            
+            MERGE --> NEXT_SITE{More Sites?}
+            NEXT_SITE -->|Yes| SITE_LOOP
+            NEXT_SITE -->|No| CACHE_PORTS[(Cache Enriched Ports)]
+        end
+        
+        subgraph W4["Worker 4: VPN Peers"]
+            SKIP_VPN{SKIP_ENRICHMENT?}
+            SKIP_VPN -->|Yes| VPN_SKIP[Skip]
+            SKIP_VPN -->|No| VPN_PARALLEL
+            
+            subgraph VPN_PARALLEL["Parallel (N workers)"]
+                VPN_GW[/"For each Gateway"/] --> VPN_CALL[searchOrgPeerPathStats<br/>site_id, mac]
+                VPN_CALL --> VPN_NEXT{More?}
+                VPN_NEXT -->|Yes| VPN_GW
+            end
+            VPN_PARALLEL --> CACHE_VPN[(Cache VPN Peers)]
+        end
+        
+        subgraph W5["Worker 5: Traffic Insights"]
+            SKIP_INS{SKIP_ENRICHMENT?}
+            SKIP_INS -->|Yes| INS_SKIP[Skip]
+            SKIP_INS -->|No| INS_PARALLEL
+            
+            subgraph INS_PARALLEL["Parallel (N workers)"]
+                INS_GW[/"For each Gateway"/] --> INS_PORT[/"For each Port"/]
+                INS_PORT --> INS_CALL[getSiteInsightMetricsForGateway<br/>or REST /insights/gateway/.../stats]
+                INS_CALL --> INS_NEXT{More Ports?}
+                INS_NEXT -->|Yes| INS_PORT
+                INS_NEXT -->|No| INS_GW_NEXT{More Gateways?}
+                INS_GW_NEXT -->|Yes| INS_GW
+            end
+            INS_PARALLEL --> CACHE_INS[(Cache Insights)]
+        end
+    end
+
+    subgraph COMPLETE["✅ Completion"]
+        CACHE_SITES & CACHE_PORTS & CACHE_VPN & CACHE_INS --> DONE
+        VPN_SKIP & INS_SKIP --> DONE
+        DONE[Update Timestamps] --> STATUS[(Set Status: idle)]
+        STATUS --> SCHEDULE[Schedule Next Refresh]
+        SCHEDULE --> WAIT([Wait WORKER_INTERVAL])
+        WAIT --> CHECK
+    end
+
+    style START fill:#4CAF50,color:white
+    style SIGNAL fill:#FF9800,color:white
+    style DONE fill:#2196F3,color:white
+    style CACHE_SITES fill:#9C27B0,color:white
+    style CACHE_GW fill:#9C27B0,color:white
+    style CACHE_PORTS fill:#9C27B0,color:white
+    style CACHE_VPN fill:#9C27B0,color:white
+    style CACHE_INS fill:#9C27B0,color:white
+```
+
+### Key Design Patterns
+
+| Pattern | Implementation | Benefit |
+|---------|----------------|---------|
+| **Parallel Workers** | 5 ThreadPoolExecutor threads | Faster data collection |
+| **Event Signaling** | `threading.Event()` for `gateways_ready` | Workers 3-5 wait for gateway list |
+| **Pagination** | `mistapi.get_all()` auto-pagination | Handles large orgs (1000+ devices) |
+| **Incremental Caching** | Cache after each site completes | Data available during fetch |
+| **Template Caching** | Redis + in-memory cache (31-day TTL) | Reduces API calls for configs |
+| **Rate Limit Handling** | Multi-token rotation on 429 | Sustained throughput |
+| **Skip Enrichment** | `SKIP_ENRICHMENT=true` flag | Fast load for large orgs |
+
+### API Call Volume Estimate
+
+For an organization with **S** sites, **G** gateways, and **P** ports per gateway:
+
+| Phase | API Calls | Notes |
+|-------|-----------|-------|
+| Org & Sites | 2 + ⌈S/1000⌉ | getSelf, getOrg, paginated sites |
+| Gateway List | ⌈G/1000⌉ | Paginated device stats |
+| Port Stats | S × (1 + enrichment) | Per-site port search + config lookups |
+| VPN Peers | G | One call per gateway |
+| Insights | G × P | One call per port (most expensive) |
+
+> **Tip**: For orgs with 500+ gateways, set `SKIP_ENRICHMENT=true` to skip VPN and insights, reducing runtime from hours to minutes.
+
 ## Redis Data Persistence
 
 Data survives container restarts via Redis AOF (Append Only File):
@@ -207,13 +337,13 @@ volumes:
 | `mistapi.api.v1.sites.devices.searchSiteDevices` | GET | Search site devices with stats=True (runtime IPs from if_stat) |
 | `mistapi.api.v1.sites.stats.searchSiteSwOrGwPorts` | GET | Search site-level port statistics (device_type=gateway) |
 
-#### Direct HTTP (SDK not supported)
+#### Site Insights
 
 | API Endpoint | Method | Description |
 |--------------|--------|-------------|
-| `/api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats` | GET | Port traffic time-series (rx_bps, tx_bps) |
+| `mistapi.api.v1.sites.insights.getSiteInsightMetricsForGateway` | GET | Port traffic time-series metrics (rx_bps, tx_bps) |
 
-> **Note**: The gateway insights endpoint uses direct HTTP requests as the mistapi SDK doesn't support it yet. Parameters: `port_id`, `start`, `end`, `interval`, `metrics=rx_bps,tx_bps`. Response includes `rt` (timestamps), `rx_bps`, and `tx_bps` arrays.
+> **Note**: Gateway insights requires mistapi >= 0.59.3. Parameters: `site_id`, `device_id`, `metric` (e.g., 'rx_bps'), `start`, `end`, `interval`. For port-specific data, use the REST endpoint `/api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats` with `port_id` parameter.
 
 ## License
 
