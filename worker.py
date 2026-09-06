@@ -130,12 +130,21 @@ class DataWorker:
         - Worker 3: Port stats (starts after gateways available)
         - Worker 4: VPN peers (starts after gateways available)
         - Worker 5: Insights (starts after ports available)
+        
+        API OPTIMIZATION: Uses bulk prefetching to reduce API calls:
+        - Templates/Profiles: 2 calls total instead of per-device
+        - Device configs/runtime: 2 calls per site instead of per-device
         """
         start_time = time.time()
         logger.info("=== Starting PARALLEL data refresh ===")
         
         try:
             self.cache.set_worker_status('running', {'started': datetime.now().isoformat(), 'mode': 'parallel'})
+            
+            # OPTIMIZATION: Prefetch all templates and profiles upfront (2 API calls)
+            logger.info("Pre-fetching all gateway templates and device profiles...")
+            self.mist.prefetch_all_templates_and_profiles()
+            logger.info("Templates/profiles prefetch complete")
             
             # Shared state for coordination between workers
             gateways_ready = threading.Event()
@@ -240,9 +249,13 @@ class DataWorker:
             # ===== COMPLETE =====
             elapsed = time.time() - start_time
             gws = gateways_data['list']
+            
+            # OPTIMIZATION: Clear bulk caches to free memory after fetch cycle
+            self.mist._clear_bulk_caches()
+            
             self.cache.set_last_update(time.time())
             self.cache.set_loading_phase('complete', 5, {
-                'description': 'All data loaded (parallel)',
+                'description': 'All data loaded (parallel, optimized)',
                 'duration_seconds': round(elapsed, 2),
                 'gateways_count': len(gws) if gws else 0
             })
@@ -250,10 +263,10 @@ class DataWorker:
                 'last_run': datetime.now().isoformat(),
                 'duration_seconds': round(elapsed, 2),
                 'gateways_count': len(gws) if gws else 0,
-                'mode': 'parallel'
+                'mode': 'parallel_optimized'
             })
             
-            logger.info(f"=== PARALLEL data refresh complete in {elapsed:.1f}s ===")
+            logger.info(f"=== PARALLEL OPTIMIZED data refresh complete in {elapsed:.1f}s ===")
             
         except Exception as e:
             logger.error(f"Error during data refresh: {e}")
@@ -356,7 +369,7 @@ class DataWorker:
             total_ports = 0
             devices_with_ports = 0
             
-            logger.info(f"Fetching port stats for {total_sites} sites (with config enrichment)...")
+            logger.info(f"Fetching port stats for {total_sites} sites (with OPTIMIZED config enrichment)...")
             
             for i, site in enumerate(sites):
                 site_id = site.get('id')
@@ -366,6 +379,10 @@ class DataWorker:
                     continue
                 
                 try:
+                    # OPTIMIZATION: Prefetch all device data for this site (2 API calls)
+                    # This replaces individual per-device calls with bulk fetches
+                    site_data = self.mist.prefetch_site_device_data(site_id)
+                    
                     # Fetch ports for this site using site-level API
                     site_ports = self.mist.get_site_port_stats(site_id)
                     
@@ -382,13 +399,13 @@ class DataWorker:
                                     site_ports_by_mac[mac] = []
                                 site_ports_by_mac[mac].append(port)
                         
-                        # Enrich and assign to gateways
+                        # Enrich and assign to gateways using OPTIMIZED bulk method
                         for mac, raw_ports in site_ports_by_mac.items():
                             if mac in gateway_by_mac:
                                 gateway = gateway_by_mac[mac]
-                                # Enrich ports with config data
-                                enriched_ports = self.mist.enrich_gateway_ports(
-                                    gateway, raw_ports, inventory_map
+                                # OPTIMIZATION: Use bulk-enriched method (no per-device API calls)
+                                enriched_ports = self.mist.enrich_gateway_ports_optimized(
+                                    gateway, raw_ports, inventory_map, site_data
                                 )
                                 gateway['ports'] = enriched_ports
                                 gateway['num_ports'] = len(enriched_ports)  # For frontend display

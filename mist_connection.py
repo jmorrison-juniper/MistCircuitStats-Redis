@@ -27,10 +27,18 @@ class MistConnection:
     _device_profile_cache: Dict[str, Dict] = {}
     _gateway_template_cache: Dict[str, Dict] = {}
     
+    # NEW: Bulk-fetched caches (populated once per refresh cycle)
+    _all_gateway_templates: Optional[Dict[str, Dict]] = None  # keyed by template_id
+    _all_device_profiles: Optional[Dict[str, Dict]] = None  # keyed by profile_id
+    _all_device_configs: Optional[Dict[str, Dict]] = None  # keyed by device_id
+    _all_runtime_stats: Optional[Dict[str, Dict]] = None  # keyed by device_mac
+    _bulk_cache_time: float = 0
+    
     # Cache TTLs (in seconds)
     SITES_CACHE_TTL = 300  # 5 minutes
     PROFILE_CACHE_TTL = 600  # 10 minutes
     TEMPLATE_CACHE_TTL = 2678400  # 31 days for Redis persistence
+    BULK_CACHE_TTL = 300  # 5 minutes for bulk-fetched data
     
     # API rate limiting delay (set via API_DELAY_MS env var, default 2ms)
     API_DELAY_SECONDS = float(os.environ.get('API_DELAY_MS', '2')) / 1000.0
@@ -476,6 +484,197 @@ class MistConnection:
             logger.warning(f"Error in batch inventory fetch: {str(e)}")
         
         return inventory_data
+
+    # ========== BULK FETCH METHODS (API Optimization) ==========
+    
+    def prefetch_all_templates_and_profiles(self) -> None:
+        """
+        Pre-fetch ALL gateway templates and device profiles in 2 API calls.
+        Call this once at the start of a refresh cycle to avoid per-template/profile calls.
+        
+        This replaces potentially hundreds of individual getOrgGatewayTemplate() and 
+        getOrgDeviceProfile() calls with just 2 bulk API calls.
+        """
+        current_time = time.time()
+        
+        # Skip if recently fetched
+        if (MistConnection._all_gateway_templates is not None and 
+            MistConnection._all_device_profiles is not None and
+            current_time - MistConnection._bulk_cache_time < self.BULK_CACHE_TTL):
+            logger.debug("Using cached bulk templates/profiles data")
+            return
+        
+        logger.info("Pre-fetching all gateway templates and device profiles...")
+        
+        # Fetch all gateway templates (1 API call + pagination)
+        try:
+            response = mistapi.api.v1.orgs.gatewaytemplates.listOrgGatewayTemplates(
+                self.apisession,
+                self.org_id,  # type: ignore[arg-type]
+                limit=1000
+            )
+            time.sleep(self.API_DELAY_SECONDS)
+            
+            if response.status_code == 200:
+                templates = mistapi.get_all(self.apisession, response)
+                MistConnection._all_gateway_templates = {t.get('id'): t for t in templates if t.get('id')}
+                logger.info(f"Pre-fetched {len(MistConnection._all_gateway_templates)} gateway templates")
+                
+                # Also populate Redis cache for persistence
+                if self._redis_cache:
+                    for template_id, template_data in MistConnection._all_gateway_templates.items():
+                        self._redis_cache.set_gateway_template(template_id, template_data, ttl=self.TEMPLATE_CACHE_TTL)
+            else:
+                logger.warning(f"Failed to fetch gateway templates: {response.status_code}")
+                MistConnection._all_gateway_templates = {}
+        except Exception as e:
+            logger.error(f"Error fetching gateway templates: {e}")
+            MistConnection._all_gateway_templates = {}
+        
+        # Fetch all device profiles for gateways (1 API call + pagination)
+        try:
+            response = mistapi.api.v1.orgs.deviceprofiles.listOrgDeviceProfiles(
+                self.apisession,
+                self.org_id,  # type: ignore[arg-type]
+                type='gateway',
+                limit=1000
+            )
+            time.sleep(self.API_DELAY_SECONDS)
+            
+            if response.status_code == 200:
+                profiles = mistapi.get_all(self.apisession, response)
+                MistConnection._all_device_profiles = {p.get('id'): p for p in profiles if p.get('id')}
+                logger.info(f"Pre-fetched {len(MistConnection._all_device_profiles)} device profiles")
+                
+                # Also populate Redis cache for persistence
+                if self._redis_cache:
+                    for profile_id, profile_data in MistConnection._all_device_profiles.items():
+                        self._redis_cache.set_device_profile(profile_id, profile_data, ttl=self.TEMPLATE_CACHE_TTL)
+            else:
+                logger.warning(f"Failed to fetch device profiles: {response.status_code}")
+                MistConnection._all_device_profiles = {}
+        except Exception as e:
+            logger.error(f"Error fetching device profiles: {e}")
+            MistConnection._all_device_profiles = {}
+        
+        MistConnection._bulk_cache_time = current_time
+
+    def prefetch_site_device_data(self, site_id: str) -> Dict[str, Dict]:
+        """
+        Pre-fetch all gateway device configs AND runtime stats for a site in 2 API calls.
+        
+        This replaces N individual getSiteDevice() + searchSiteDevices(mac=X) calls
+        with just 2 bulk calls per site.
+        
+        Args:
+            site_id: Site ID to fetch data for
+            
+        Returns:
+            Dict with 'configs' and 'runtime' keyed by device_id and device_mac respectively
+        """
+        result = {'configs': {}, 'runtime': {}}
+        
+        # 1. Fetch all gateway device configs for this site (1 API call)
+        try:
+            response = mistapi.api.v1.sites.devices.listSiteDevices(
+                self.apisession,
+                site_id,
+                type='gateway',
+                limit=1000
+            )
+            time.sleep(self.API_DELAY_SECONDS)
+            
+            if response.status_code == 200:
+                devices = mistapi.get_all(self.apisession, response)
+                for device in devices:
+                    device_id = device.get('id')
+                    if device_id:
+                        result['configs'][device_id] = device
+                        # Also cache in Redis for persistence
+                        if self._redis_cache:
+                            self._redis_cache.set_device_config(device_id, device, ttl=self.TEMPLATE_CACHE_TTL)
+                logger.debug(f"Site {site_id}: fetched {len(result['configs'])} device configs")
+        except Exception as e:
+            logger.warning(f"Error fetching device configs for site {site_id}: {e}")
+        
+        # 2. Fetch all gateway runtime stats for this site (1 API call + pagination)
+        try:
+            response = mistapi.api.v1.sites.devices.searchSiteDevices(
+                self.apisession,
+                site_id,
+                type='gateway',
+                stats=True,
+                limit=1000
+            )
+            time.sleep(self.API_DELAY_SECONDS)
+            
+            if response.status_code == 200:
+                # Use get_all to handle pagination for search endpoints
+                devices = mistapi.get_all(self.apisession, response)
+                for device in devices:
+                    device_mac = device.get('mac')
+                    if device_mac:
+                        result['runtime'][device_mac] = device
+                logger.debug(f"Site {site_id}: fetched {len(result['runtime'])} device runtime stats")
+        except Exception as e:
+            logger.warning(f"Error fetching runtime stats for site {site_id}: {e}")
+        
+        return result
+
+    def _get_gateway_template_cached(self, gatewaytemplate_id: str) -> Dict:
+        """
+        Get gateway template from pre-fetched cache (no API call).
+        Falls back to individual API call if not in cache.
+        """
+        # Check bulk cache first
+        if MistConnection._all_gateway_templates and gatewaytemplate_id in MistConnection._all_gateway_templates:
+            return MistConnection._all_gateway_templates[gatewaytemplate_id]
+        
+        # Fall back to original method (will use Redis or API)
+        return self._get_gateway_template(gatewaytemplate_id)
+
+    def _get_device_profile_cached(self, deviceprofile_id: str) -> Dict:
+        """
+        Get device profile from pre-fetched cache (no API call).
+        Falls back to individual API call if not in cache.
+        """
+        # Check bulk cache first
+        if MistConnection._all_device_profiles and deviceprofile_id in MistConnection._all_device_profiles:
+            return MistConnection._all_device_profiles[deviceprofile_id]
+        
+        # Fall back to original method (will use Redis or API)
+        return self._get_device_profile(deviceprofile_id)
+
+    def _get_device_config_from_bulk(self, device_id: str, site_configs: Dict[str, Dict]) -> Dict:
+        """
+        Get device config from site-level bulk fetch results.
+        Falls back to individual API call if not available.
+        """
+        if device_id in site_configs:
+            return site_configs[device_id]
+        
+        # Config not in bulk result - this shouldn't happen but fall back
+        logger.debug(f"Device {device_id} not in bulk configs, falling back to individual fetch")
+        return {}
+
+    def _get_runtime_stats_from_bulk(self, device_mac: str, site_runtime: Dict[str, Dict]) -> Dict:
+        """
+        Get device runtime stats (if_stat) from site-level bulk fetch results.
+        """
+        if device_mac in site_runtime:
+            return site_runtime[device_mac]
+        return {}
+
+    def _clear_bulk_caches(self) -> None:
+        """Clear all bulk caches (call at end of refresh cycle or on error)."""
+        MistConnection._all_gateway_templates = None
+        MistConnection._all_device_profiles = None
+        MistConnection._all_device_configs = None
+        MistConnection._all_runtime_stats = None
+        MistConnection._bulk_cache_time = 0
+        logger.debug("Cleared bulk caches")
+
+    # ========== END BULK FETCH METHODS ==========
 
     def _get_device_profile(self, deviceprofile_id: str) -> Dict:
         """
@@ -1497,6 +1696,198 @@ class MistConnection:
         except Exception as e:
             logger.error(f"Error getting site port stats for {site_id}: {str(e)}")
             return []
+
+    def enrich_gateway_ports_optimized(self, gateway: Dict, wan_ports: List[Dict], 
+                                        inventory_map: Dict, site_data: Dict) -> List[Dict]:
+        """
+        OPTIMIZED: Enrich WAN port stats using pre-fetched bulk data (NO per-device API calls).
+        
+        This uses data from:
+        - prefetch_all_templates_and_profiles() for templates/profiles
+        - prefetch_site_device_data() for device configs and runtime stats
+        
+        Args:
+            gateway: Gateway dict with id, site_id, mac
+            wan_ports: List of raw WAN port stats from searchSiteSwOrGwPorts
+            inventory_map: Dict of MAC -> inventory data (deviceprofile_id, etc.)
+            site_data: Dict with 'configs' and 'runtime' from prefetch_site_device_data()
+            
+        Returns:
+            List of enriched port dicts with all config fields
+        """
+        gw_id = gateway.get('id')
+        gw_site_id = gateway.get('site_id')
+        gw_mac = gateway.get('mac')
+        
+        if not gw_id or not gw_site_id:
+            return self._minimal_port_enrichment(wan_ports)
+        
+        port_configs = []
+        wan_port_config_by_name = {}
+        runtime_ips_by_port = {}
+        
+        try:
+            # Get profile ID from inventory map
+            inventory_data = inventory_map.get(gw_mac, {})
+            deviceprofile_id = inventory_data.get('deviceprofile_id')
+            
+            # Get device configuration from BULK data (no API call)
+            device_config = self._get_device_config_from_bulk(gw_id, site_data.get('configs', {}))
+            gatewaytemplate_id = None
+            
+            if not deviceprofile_id:
+                gatewaytemplate_id = device_config.get('gatewaytemplate_id')
+                # For Branch devices, gatewaytemplate_id is on the site object
+                if not gatewaytemplate_id:
+                    site_info = self._get_site_by_id(gw_site_id)
+                    if site_info:
+                        gatewaytemplate_id = site_info.get('gatewaytemplate_id')
+            
+            # Get template/profile from BULK cache (no API call)
+            merged_port_config = {}
+            if deviceprofile_id:
+                profile_data = self._get_device_profile_cached(deviceprofile_id)
+                if profile_data and 'port_config' in profile_data:
+                    merged_port_config = copy.deepcopy(profile_data.get('port_config', {}))
+            elif gatewaytemplate_id:
+                template_data = self._get_gateway_template_cached(gatewaytemplate_id)
+                if template_data and 'port_config' in template_data:
+                    merged_port_config = copy.deepcopy(template_data.get('port_config', {}))
+            
+            # Merge device-level port_config overrides
+            device_port_config = device_config.get('port_config', {})
+            overridden_ports = set()
+            if device_port_config:
+                for port_name, port_cfg in device_port_config.items():
+                    overridden_ports.add(port_name)
+                    if port_name in merged_port_config:
+                        merged_port_config[port_name].update(port_cfg)
+                    else:
+                        merged_port_config[port_name] = port_cfg
+            
+            # Extract WAN port configurations
+            for port_name, port_cfg in merged_port_config.items():
+                if port_cfg.get('usage') == 'wan':
+                    ip_cfg = port_cfg.get('ip_config', {})
+                    template_ip_type = ip_cfg.get('type', 'dhcp')
+                    
+                    wan_port_config_by_name[port_name] = {
+                        'name': port_cfg.get('name', ''),
+                        'description': port_cfg.get('description', '').strip(),
+                        'ip': ip_cfg.get('ip', ''),
+                        'netmask': ip_cfg.get('netmask', ''),
+                        'gateway': ip_cfg.get('gateway', ''),
+                        'template_type': template_ip_type,
+                        'vlan_id': str(port_cfg.get('vlan_id', '')) if port_cfg.get('vlan_id') else '',
+                        'disabled': port_cfg.get('disabled', False)
+                    }
+            
+            # Get runtime IPs from BULK data (no API call)
+            runtime_device = self._get_runtime_stats_from_bulk(gw_mac, site_data.get('runtime', {}))
+            if runtime_device and 'if_stat' in runtime_device:
+                if_stat = runtime_device['if_stat']
+                
+                for if_name, if_data in if_stat.items():
+                    if if_data.get('port_usage') == 'wan':
+                        port_id = if_data.get('port_id', '')
+                        ips = if_data.get('ips', [])
+                        
+                        runtime_entry = dict(if_data)
+                        
+                        if ips and len(ips) > 0 and '/' in ips[0]:
+                            ip_cidr = ips[0]
+                            ip, cidr = ip_cidr.split('/')
+                            cidr_int = int(cidr)
+                            mask = (0xffffffff >> (32 - cidr_int)) << (32 - cidr_int)
+                            netmask = f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
+                            
+                            runtime_entry['ip'] = ip
+                            runtime_entry['netmask'] = netmask
+                        else:
+                            runtime_entry['ip'] = ''
+                            runtime_entry['netmask'] = ''
+                        
+                        runtime_ips_by_port[port_id] = runtime_entry
+                        
+        except Exception as e:
+            logger.warning(f"Could not get config for gateway {gw_id}: {str(e)}")
+            return self._minimal_port_enrichment(wan_ports)
+        
+        # Build enriched port objects (same logic as original)
+        for port in wan_ports:
+            port_id = port.get('port_id', '')
+            port_desc = port.get('port_desc', '').strip()
+            
+            port_config = wan_port_config_by_name.get(port_id, {})
+            
+            if not port_config:
+                for cfg_name, cfg in wan_port_config_by_name.items():
+                    if cfg_name.startswith(port_id + '.'):
+                        port_config = cfg
+                        break
+            
+            if not port_config and port_desc:
+                for cfg_name, cfg in wan_port_config_by_name.items():
+                    if cfg.get('description') == port_desc:
+                        port_config = cfg
+                        break
+            
+            runtime_ip_data = runtime_ips_by_port.get(port_id, {})
+            template_type = port_config.get('template_type', 'dhcp') if port_config else 'dhcp'
+            
+            raw_address_mode = runtime_ip_data.get('address_mode', '') if runtime_ip_data else ''
+            address_mode_map = {'dynamic': 'dhcp', 'static': 'static'}
+            runtime_type = address_mode_map.get(raw_address_mode.lower(), template_type)
+            
+            is_overridden = (runtime_type != template_type)
+            
+            if runtime_ip_data and runtime_ip_data.get('ip'):
+                ip_addr = runtime_ip_data.get('ip', '')
+                netmask_str = runtime_ip_data.get('netmask', '')
+                if netmask_str and '.' in netmask_str:
+                    parts = netmask_str.split('.')
+                    binary = ''.join([bin(int(x)+256)[3:] for x in parts])
+                    netmask = str(binary.count('1'))
+                else:
+                    netmask = netmask_str
+            else:
+                ip_addr = port_config.get('ip', '').strip() if port_config else ''
+                netmask = port_config.get('netmask', '').strip() if port_config else ''
+                if netmask.startswith('/'):
+                    netmask = netmask[1:]
+            
+            port_obj = {
+                'name': port_id,
+                'port_id': port_id,
+                'wan_name': port_config.get('name', '') if port_config else '',
+                'description': port_config.get('description', port_desc) if port_config else port_desc,
+                'enabled': not (port_config.get('disabled', False) if port_config else False),
+                'usage': 'wan',
+                'ip': ip_addr,
+                'netmask': netmask,
+                'gateway': port_config.get('gateway', '') if port_config else '',
+                'type': runtime_type,
+                'template_type': template_type,
+                'vlan_id': port_config.get('vlan_id', '') if port_config else '',
+                'override': 'yes' if is_overridden else 'no',
+                'up': port.get('up', False),
+                'rx_bytes': port.get('rx_bytes', 0),
+                'tx_bytes': port.get('tx_bytes', 0),
+                'rx_pkts': port.get('rx_pkts', 0),
+                'tx_pkts': port.get('tx_pkts', 0),
+                'speed': port.get('speed', 0),
+                'mac': port.get('port_mac', '')
+            }
+            
+            if runtime_ip_data:
+                for key, value in runtime_ip_data.items():
+                    if key not in port_obj:
+                        port_obj[key] = value
+            
+            port_configs.append(port_obj)
+        
+        port_configs.sort(key=lambda p: p.get('name', ''))
+        return port_configs
 
     def enrich_gateway_ports(self, gateway: Dict, wan_ports: List[Dict], inventory_map: Dict) -> List[Dict]:
         """
