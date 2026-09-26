@@ -141,7 +141,7 @@ MistCircuitStats-Redis/
 
 ### Container Image Build
 
-The `build-and-push.yml` workflow calls the shared `reusable-container-image.yml` workflow in [misthelper-devtools](https://github.com/jmorrison-juniper/misthelper-devtools). The caller pins a devtools release commit, and a comment names the release tag.
+The `build-and-push.yml` workflow calls the shared `reusable-container-image.yml` workflow in [misthelper-devtools](https://github.com/jmorrison-juniper/misthelper-devtools). The caller pins a devtools release commit, and a comment names the release tag. Dependabot keeps the actions and the devtools pins up to date.
 
 ## Data Flow
 
