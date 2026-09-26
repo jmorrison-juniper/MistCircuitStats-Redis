@@ -139,6 +139,10 @@ MistCircuitStats-Redis/
 └── .env.example
 ```
 
+### Container Image Build
+
+The `build-and-push.yml` workflow calls the shared `reusable-container-image.yml` workflow in [misthelper-devtools](https://github.com/jmorrison-juniper/misthelper-devtools). The caller pins a devtools release commit, and a comment names the release tag.
+
 ## Data Flow
 
 1. **Worker starts**: Fetches all data from Mist API
