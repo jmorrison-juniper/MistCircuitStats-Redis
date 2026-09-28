@@ -575,6 +575,8 @@ class MistConnection:
         result = {'configs': {}, 'runtime': {}}
         
         # 1. Fetch all gateway device configs for this site (1 API call)
+        # NOTE: Using limit=1000 which is far more than any site will have.
+        # Per-site device counts are small, so pagination is not needed.
         try:
             response = mistapi.api.v1.sites.devices.listSiteDevices(
                 self.apisession,
@@ -585,7 +587,8 @@ class MistConnection:
             time.sleep(self.API_DELAY_SECONDS)
             
             if response.status_code == 200:
-                devices = mistapi.get_all(self.apisession, response)
+                # Extract devices directly - no pagination needed for per-site calls
+                devices = response.data if isinstance(response.data, list) else []
                 for device in devices:
                     device_id = device.get('id')
                     if device_id:
@@ -597,7 +600,11 @@ class MistConnection:
         except Exception as e:
             logger.warning(f"Error fetching device configs for site {site_id}: {e}")
         
-        # 2. Fetch all gateway runtime stats for this site (1 API call + pagination)
+        # 2. Fetch all gateway runtime stats for this site (1 API call)
+        # NOTE: Using limit=1000 which is far more than any site will have.
+        # We do NOT use get_all() here because searchSiteDevices uses cursor-based
+        # pagination and the SDK's get_all() has issues with it (infinite loop).
+        # Since per-site counts are small, the first page is always sufficient.
         try:
             response = mistapi.api.v1.sites.devices.searchSiteDevices(
                 self.apisession,
@@ -609,8 +616,9 @@ class MistConnection:
             time.sleep(self.API_DELAY_SECONDS)
             
             if response.status_code == 200:
-                # Use get_all to handle pagination for search endpoints
-                devices = mistapi.get_all(self.apisession, response)
+                # Extract results directly - pagination not needed for per-site calls
+                data = response.data
+                devices = data.get('results', []) if isinstance(data, dict) else data
                 for device in devices:
                     device_mac = device.get('mac')
                     if device_mac:
@@ -1675,6 +1683,9 @@ class MistConnection:
                 raise ValueError("Site ID is required")
             
             # Use site-level API with device_type=gateway
+            # NOTE: limit=1000 is far more than any site will have.
+            # We do NOT use get_all() here because search* endpoints use cursor-based
+            # pagination and the SDK's get_all() has issues with it (infinite loop).
             port_response = mistapi.api.v1.sites.stats.searchSiteSwOrGwPorts(
                 self.apisession,
                 site_id,
@@ -1687,8 +1698,9 @@ class MistConnection:
                 logger.warning(f"API error getting port stats for site {site_id}: {port_response.status_code}")
                 return []
             
-            # Use mistapi.get_all to handle pagination automatically
-            all_ports = mistapi.get_all(self.apisession, port_response)
+            # Extract results directly - no pagination needed for per-site calls
+            data = port_response.data
+            all_ports = data.get('results', []) if isinstance(data, dict) else data if isinstance(data, list) else []
             
             logger.debug(f"Retrieved {len(all_ports)} ports for site {site_id}")
             return all_ports
