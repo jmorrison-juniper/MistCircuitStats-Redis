@@ -1,0 +1,14 @@
+# Development and CI tools. The container image installs requirements.txt only.
+#
+# The shared quality gate workflow installs this file in each gate job, so it
+# pins each gate tool. misthelper-devtools provides the shared gate helpers. Pin
+# a devtools release commit, and name the release tag in the comment.
+-r requirements.txt
+bandit>=1.9.4,<2
+black>=26.5.1,<27
+mypy>=1.19,<2
+pip-audit>=2.10.1,<3
+ruff>=0.16.9,<0.17
+types-requests>=2.32.4,<3
+vulture>=2.16,<3
+misthelper-devtools @ git+https://github.com/jmorrison-juniper/misthelper-devtools@b140350ebc40e61b57a3a65731c0df520f143661  # v0.6.0

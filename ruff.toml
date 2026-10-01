@@ -1,0 +1,9 @@
+target-version = "py313"
+
+[lint.per-file-ignores]
+# Each route, cache call, and worker task logs any failure and keeps the app
+# and the refresh loop running, as the code did before the gates.
+"app.py" = ["BLE001"]
+"mist_connection.py" = ["BLE001"]
+"redis_cache.py" = ["BLE001"]
+"worker.py" = ["BLE001"]
