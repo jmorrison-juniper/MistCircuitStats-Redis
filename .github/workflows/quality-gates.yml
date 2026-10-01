@@ -1,0 +1,49 @@
+name: Quality Gates
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gates-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The shared workflow in misthelper-devtools runs each gate as its own job.
+  # Each job installs requirements-dev.txt, which pins every gate tool. Each
+  # check name starts with the job ID, for example "gates / Ruff (lint)".
+  gates:
+    permissions:
+      contents: read
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-python-quality-gates.yml@b140350ebc40e61b57a3a65731c0df520f143661 # v0.6.0
+    with:
+      python-version: '3.13'
+      cache-dependency-path: requirements-dev.txt
+      ruff: true
+      black: true
+      mypy: true
+      mypy-args: app.py mist_connection.py redis_cache.py worker.py
+      bandit: true
+      bandit-args: -r . -ll -x ./.github,./templates
+      pip-audit: true
+      vulture: true
+      vulture-args: . --min-confidence 90 --exclude .github,templates
+
+  # The shared workflow opens one issue for each failed gate on main and closes
+  # that issue after the gate passes. It reads the results output of the gates.
+  quality_gate_issues:
+    name: "Sync quality-gate issues"
+    needs: gates
+    if: ${{ always() }}
+    permissions:
+      issues: write
+      pull-requests: read
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-quality-gate-issues.yml@b140350ebc40e61b57a3a65731c0df520f143661 # v0.6.0
+    with:
+      results: ${{ needs.gates.outputs.results }}

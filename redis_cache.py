@@ -9,11 +9,19 @@ import json
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, ClassVar
 
 import redis
 
 logger = logging.getLogger(__name__)
+
+REDIS_ERRORS = (
+    redis.RedisError,
+    TypeError,
+    ValueError,
+    json.JSONDecodeError,
+    AttributeError,
+)
 
 
 class RedisCache:
@@ -29,7 +37,7 @@ class RedisCache:
 
     # Multi-resolution insight keys
     # Each resolution stores the same ~168 data points at different intervals
-    INSIGHT_RESOLUTIONS = {
+    INSIGHT_RESOLUTIONS: ClassVar[dict[str, dict[str, int]]] = {
         "1h": {"seconds": 3600, "interval": 60},  # 1 hour, 1-min intervals (~60 points)
         "6h": {
             "seconds": 21600,
@@ -72,11 +80,24 @@ class RedisCache:
         """Serialize data to JSON string"""
         return json.dumps(data)
 
-    def _deserialize(self, data: str | None) -> Any:
+    @staticmethod
+    def _redis_text(data: str | bytes | None) -> str | None:
+        if isinstance(data, bytes):
+            return data.decode()
+        return data
+
+    @staticmethod
+    def _redis_key(key: str | bytes) -> str:
+        if isinstance(key, bytes):
+            return key.decode()
+        return key
+
+    def _deserialize(self, data: str | bytes | None) -> Any:
         """Deserialize JSON string to data"""
-        if data is None:
+        text = self._redis_text(data)
+        if text is None:
             return None
-        return json.loads(data)
+        return json.loads(text)
 
     # ==================== Organization Data ====================
 
@@ -89,7 +110,7 @@ class RedisCache:
                 self.PREFIX_ORG, ttl or self.DEFAULT_TTL, self._serialize(org_data)
             )
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing organization data: %s", e)
             return False
 
@@ -98,7 +119,7 @@ class RedisCache:
         try:
             data = self.client.get(self.PREFIX_ORG)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving organization data: %s", e)
             return None
 
@@ -111,7 +132,7 @@ class RedisCache:
                 self.PREFIX_SITES, ttl or self.DEFAULT_TTL, self._serialize(sites)
             )
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing sites data: %s", e)
             return False
 
@@ -120,7 +141,7 @@ class RedisCache:
         try:
             data = self.client.get(self.PREFIX_SITES)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving sites data: %s", e)
             return None
 
@@ -137,7 +158,7 @@ class RedisCache:
             )
             logger.debug("Cached device profile %s", profile_id)
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing device profile %s: %s", profile_id, e)
             return False
 
@@ -147,7 +168,7 @@ class RedisCache:
             key = f"mist:profiles:{profile_id}"
             data = self.client.get(key)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving device profile %s: %s", profile_id, e)
             return None
 
@@ -164,7 +185,7 @@ class RedisCache:
             )
             logger.debug("Cached gateway template %s", template_id)
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing gateway template %s: %s", template_id, e)
             return False
 
@@ -174,7 +195,7 @@ class RedisCache:
             key = f"mist:templates:{template_id}"
             data = self.client.get(key)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving gateway template %s: %s", template_id, e)
             return None
 
@@ -191,7 +212,7 @@ class RedisCache:
                 if data:
                     templates[template_id] = self._deserialize(data)
             return templates
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving all gateway templates: %s", e)
             return {}
 
@@ -208,7 +229,7 @@ class RedisCache:
             )
             logger.debug("Cached device config %s", device_id)
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing device config %s: %s", device_id, e)
             return False
 
@@ -218,7 +239,7 @@ class RedisCache:
             key = f"mist:device_config:{device_id}"
             data = self.client.get(key)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving device config %s: %s", device_id, e)
             return None
 
@@ -235,7 +256,7 @@ class RedisCache:
             )
             logger.info(f"Cached inventory data for {len(inventory_data)} devices")
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing inventory data: %s", e)
             return False
 
@@ -245,7 +266,7 @@ class RedisCache:
             key = "mist:inventory"
             data = self.client.get(key)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving inventory data: %s", e)
             return None
 
@@ -266,7 +287,7 @@ class RedisCache:
             )
             logger.debug("Cached raw API response %s for %s", endpoint_name, device_id)
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing raw API response: %s", e)
             return False
 
@@ -278,7 +299,7 @@ class RedisCache:
             key = f"mist:raw:{endpoint_name}:{device_id}"
             data = self.client.get(key)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving raw API response: %s", e)
             return None
 
@@ -294,7 +315,7 @@ class RedisCache:
             )
             logger.info(f"Stored {len(gateways)} gateways in cache")
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing gateway data: %s", e)
             return False
 
@@ -303,7 +324,7 @@ class RedisCache:
         try:
             data = self.client.get(self.PREFIX_GATEWAYS)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving gateway data: %s", e)
             return None
 
@@ -323,7 +344,7 @@ class RedisCache:
                 key, ttl or self.DEFAULT_TTL, self._serialize(peers_by_port)
             )
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing VPN peers for %s: %s", gateway_id, e)
             return False
 
@@ -333,7 +354,7 @@ class RedisCache:
             key = f"{self.PREFIX_VPN_PEERS}:{gateway_id}-{mac}"
             data = self.client.get(key)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving VPN peers for %s: %s", gateway_id, e)
             return None
 
@@ -349,7 +370,7 @@ class RedisCache:
             pipe.execute()
             logger.info(f"Stored VPN peers for {len(all_peers)} gateways")
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing all VPN peers: %s", e)
             return False
 
@@ -362,7 +383,7 @@ class RedisCache:
             if not keys:
                 return {}
 
-            result = {}
+            result: dict[str, dict[str, Any]] = {}
             pipe = self.client.pipeline()
             for key in keys:
                 pipe.get(key)
@@ -371,12 +392,14 @@ class RedisCache:
 
             for key, value in zip(keys, values):
                 # Extract cache_key from redis key
-                cache_key = key.replace(f"{self.PREFIX_VPN_PEERS}:", "")
+                cache_key = self._redis_key(key).replace(
+                    f"{self.PREFIX_VPN_PEERS}:", ""
+                )
                 if value:
                     result[cache_key] = self._deserialize(value)
 
             return result
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving all VPN peers: %s", e)
             return {}
 
@@ -394,7 +417,7 @@ class RedisCache:
             key = f"{self.PREFIX_INSIGHTS}:{gateway_id}:{port_id}"
             self.client.setex(key, ttl or self.DEFAULT_TTL, self._serialize(insights))
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing insights for %s/%s: %s", gateway_id, port_id, e)
             return False
 
@@ -404,7 +427,7 @@ class RedisCache:
             key = f"{self.PREFIX_INSIGHTS}:{gateway_id}:{port_id}"
             data = self.client.get(key)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error(
                 "Error retrieving insights for %s/%s: %s", gateway_id, port_id, e
             )
@@ -430,7 +453,7 @@ class RedisCache:
             pipe.execute()
             logger.info("Stored insights for %s ports", count)
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing all insights: %s", e)
             return False
 
@@ -443,7 +466,7 @@ class RedisCache:
             if not keys:
                 return {}
 
-            result = {}
+            result: dict[str, dict[str, Any]] = {}
             pipe = self.client.pipeline()
             for key in keys:
                 pipe.get(key)
@@ -452,7 +475,7 @@ class RedisCache:
 
             for key, value in zip(keys, values):
                 # Parse key: mist:insights:gateway_id:port_id
-                parts = key.split(":", 3)
+                parts = self._redis_key(key).split(":", 3)
                 if len(parts) >= 4:
                     gateway_id = parts[2]
                     port_id = parts[3]
@@ -464,7 +487,7 @@ class RedisCache:
                         result[gateway_id][port_id] = self._deserialize(value)
 
             return result
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving all insights: %s", e)
             return {}
 
@@ -496,7 +519,7 @@ class RedisCache:
             key = f"{self.PREFIX_INSIGHTS}:{gateway_id}:{port_id}:{resolution}"
             self.client.setex(key, ttl or self.DEFAULT_TTL, self._serialize(insights))
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error(
                 "Error storing insights for %s/%s/%s: %s",
                 gateway_id,
@@ -527,7 +550,7 @@ class RedisCache:
             key = f"{self.PREFIX_INSIGHTS}:{gateway_id}:{port_id}:{resolution}"
             data = self.client.get(key)
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error(
                 "Error retrieving insights for %s/%s/%s: %s",
                 gateway_id,
@@ -563,7 +586,7 @@ class RedisCache:
             pipe.execute()
             logger.info("Stored multi-resolution insights: %s entries", count)
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing multi-resolution insights: %s", e)
             return False
 
@@ -574,7 +597,7 @@ class RedisCache:
         try:
             self.client.set(f"{self.PREFIX_METADATA}:last_update", str(timestamp))
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing last update timestamp: %s", e)
             return False
 
@@ -583,7 +606,7 @@ class RedisCache:
         try:
             data = self.client.get(f"{self.PREFIX_METADATA}:last_update")
             return float(data) if data else None
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving last update timestamp: %s", e)
             return None
 
@@ -597,7 +620,7 @@ class RedisCache:
                 f"{self.PREFIX_METADATA}:worker_status", self._serialize(status_data)
             )
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing worker status: %s", e)
             return False
 
@@ -616,7 +639,7 @@ class RedisCache:
                 f"{self.PREFIX_METADATA}:loading_phase", self._serialize(phase_data)
             )
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing loading phase: %s", e)
             return False
 
@@ -625,7 +648,7 @@ class RedisCache:
         try:
             data = self.client.get(f"{self.PREFIX_METADATA}:loading_phase")
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving loading phase: %s", e)
             return None
 
@@ -634,7 +657,7 @@ class RedisCache:
         try:
             data = self.client.get(f"{self.PREFIX_METADATA}:worker_status")
             return self._deserialize(data)
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving worker status: %s", e)
             return None
 
@@ -668,7 +691,7 @@ class RedisCache:
                 self._serialize(status_data),
             )
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error storing rate limit status: %s", e)
             return False
 
@@ -679,14 +702,17 @@ class RedisCache:
             if data:
                 status = self._deserialize(data)
                 # Check if rate limit has expired
-                if status and status.get("reset_time"):
-                    if time.time() >= status["reset_time"]:
-                        # Rate limit expired, clear it
-                        self.clear_rate_limit_status()
-                        return {"is_limited": False}
+                if (
+                    status
+                    and status.get("reset_time")
+                    and time.time() >= status["reset_time"]
+                ):
+                    # Rate limit expired, clear it
+                    self.clear_rate_limit_status()
+                    return {"is_limited": False}
                 return status
             return {"is_limited": False}
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error retrieving rate limit status: %s", e)
             return {"is_limited": False}
 
@@ -695,7 +721,7 @@ class RedisCache:
         try:
             self.client.delete(f"{self.PREFIX_METADATA}:rate_limit")
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error clearing rate limit status: %s", e)
             return False
 
@@ -720,7 +746,7 @@ class RedisCache:
 
             logger.info("Cleared all cached data")
             return True
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error clearing cache: %s", e)
             return False
 
@@ -766,7 +792,7 @@ class RedisCache:
                             peers_by_port = peer_data.get("peers_by_port", {})
                             for port_peers in peers_by_port.values():
                                 total_vpn_peers += len(port_peers)
-                    except Exception:
+                    except REDIS_ERRORS:
                         pass  # Skip malformed entries
 
             stats = {
@@ -786,7 +812,7 @@ class RedisCache:
                 "worker_status": self.get_worker_status(),
             }
             return stats
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error getting cache stats: %s", e)
             return {}
 
@@ -794,6 +820,6 @@ class RedisCache:
         """Check if cache has valid data"""
         try:
             return self.client.exists(self.PREFIX_GATEWAYS) > 0
-        except Exception as e:
+        except REDIS_ERRORS as e:
             logger.error("Error checking cache validity: %s", e)
             return False
