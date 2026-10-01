@@ -34,8 +34,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-WORKER_ERRORS = (RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError)
-
 from mist_connection import MistConnection
 from redis_cache import RedisCache
 
@@ -140,7 +138,7 @@ class DataWorker:
             logger.info(f"Connected to Mist API: {self.mist.host}")
 
             return True
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error("Failed to establish connections: %s", e)
             return False
 
@@ -184,7 +182,7 @@ class DataWorker:
                     logger.info("[Worker-OrgSites] Starting...")
                     self._fetch_org_and_sites()
                     logger.info("[Worker-OrgSites] Complete")
-                except WORKER_ERRORS as e:
+                except Exception as e:
                     logger.error("[Worker-OrgSites] Error: %s", e)
 
             def fetch_gateways():
@@ -197,7 +195,7 @@ class DataWorker:
                         self.cache.set_last_update(time.time())
                         logger.info(f"[Worker-Gateways] Complete: {len(gws)} gateways")
                     gateways_ready.set()  # Signal other workers
-                except WORKER_ERRORS as e:
+                except Exception as e:
                     logger.error("[Worker-Gateways] Error: %s", e)
                     gateways_ready.set()  # Signal even on error
 
@@ -216,7 +214,7 @@ class DataWorker:
                     gateways_data["list"] = self.cache.get_gateways() or gws
                     logger.info("[Worker-Ports] Complete")
                     ports_ready.set()
-                except WORKER_ERRORS as e:
+                except Exception as e:
                     logger.error("[Worker-Ports] Error: %s", e)
                     ports_ready.set()
 
@@ -236,7 +234,7 @@ class DataWorker:
                     )
                     self._fetch_vpn_peers_parallel(gws)
                     logger.info("[Worker-VPN] Complete")
-                except WORKER_ERRORS as e:
+                except Exception as e:
                     logger.error("[Worker-VPN] Error: %s", e)
 
             def fetch_insights():
@@ -255,7 +253,7 @@ class DataWorker:
                     logger.info("[Worker-Insights] Starting parallel fetch...")
                     self._fetch_insights_parallel(gws)
                     logger.info("[Worker-Insights] Complete")
-                except WORKER_ERRORS as e:
+                except Exception as e:
                     logger.error("[Worker-Insights] Error: %s", e)
 
             # Launch all workers in parallel
@@ -276,7 +274,7 @@ class DataWorker:
                     try:
                         future.result()
                         logger.info("[Coordinator] %s finished", task_name)
-                    except WORKER_ERRORS as e:
+                    except Exception as e:
                         logger.error("[Coordinator] %s failed: %s", task_name, e)
 
             # ===== COMPLETE =====
@@ -310,7 +308,7 @@ class DataWorker:
                 f"=== PARALLEL OPTIMIZED data refresh complete in {elapsed:.1f}s ==="
             )
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error("Error during data refresh: %s", e)
             logger.error(traceback.format_exc())
             self.cache.set_worker_status(
@@ -332,7 +330,7 @@ class DataWorker:
                 self.cache.set_sites(sites, ttl=self.cache_ttl)
                 logger.info(f"Cached {len(sites)} sites")
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error("Error fetching org/sites: %s", e)
 
     def _fetch_gateway_list_quick(self):
@@ -373,7 +371,7 @@ class DataWorker:
                 logger.warning("No gateways returned from API")
                 return []
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error("Error fetching gateway list: %s", e)
             return []
 
@@ -470,7 +468,7 @@ class DataWorker:
                             f"Site {i+1}/{total_sites} '{site_name}': {len(site_ports)} ports"
                         )
 
-                except WORKER_ERRORS as e:
+                except Exception as e:
                     logger.warning("Error fetching ports for site %s: %s", site_name, e)
 
                 # Progress update every 10 sites
@@ -497,7 +495,7 @@ class DataWorker:
                 total_sites,
             )
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error("Error fetching port stats: %s", e)
 
     def _update_gateways_with_ports(self, gateways: list, gateway_by_mac: dict):
@@ -505,7 +503,7 @@ class DataWorker:
         try:
             self.cache.set_gateways(gateways, ttl=self.cache_ttl)
             self.cache.set_last_update(time.time())
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.warning("Error updating gateways cache: %s", e)
 
     def _fetch_gateways(self):
@@ -527,7 +525,7 @@ class DataWorker:
                 logger.warning("No gateways returned from API")
                 return []
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error("Error fetching gateways: %s", e)
             return []
 
@@ -549,7 +547,7 @@ class DataWorker:
                     if peers:
                         cache_key = f"{gw_id}-{gw_mac}"
                         all_peers[cache_key] = peers
-                except WORKER_ERRORS as e:
+                except Exception as e:
                     logger.warning("Error fetching VPN peers for %s: %s", gw_id, e)
 
                 # Log progress every 50 gateways
@@ -571,7 +569,7 @@ class DataWorker:
 
             logger.info(f"Cached VPN peers for {len(all_peers)} gateways")
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error("Error in VPN peers fetch: %s", e)
 
     def _fetch_insights(self, gateways: list):
@@ -599,7 +597,7 @@ class DataWorker:
                 token_idx = getattr(self.mist.apisession, "_apitoken_index", 0)
                 if tokens and len(tokens) > token_idx >= 0:
                     current_token = tokens[token_idx]
-            except WORKER_ERRORS as e:
+            except Exception as e:
                 logger.debug("Could not read active Mist API token: %s", e)
 
             headers = {
@@ -658,7 +656,7 @@ class DataWorker:
                                 "timestamps": data.get("timestamps", []),
                             }
 
-                    except WORKER_ERRORS as e:
+                    except Exception as e:
                         logger.warning(
                             "Error fetching insights for %s/%s: %s",
                             gateway_id,
@@ -689,7 +687,7 @@ class DataWorker:
                 f"Cached insights for {processed} ports across {len(all_insights)} gateways"
             )
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error("Error in insights fetch: %s", e)
 
     def run(self):
@@ -759,7 +757,7 @@ class DataWorker:
             )
             return False
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.warning("Error checking cache: %s", e)
             return False
 
@@ -808,7 +806,7 @@ class DataWorker:
                 },
             )
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error(
                 "Incremental refresh failed: %s, falling back to full refresh", e
             )
@@ -836,7 +834,7 @@ class DataWorker:
                     if peers:
                         return f"{gw_id}-{gw_mac}", peers
                     return None, None
-                except WORKER_ERRORS as e:
+                except Exception as e:
                     logger.debug("VPN peers error for %s: %s", gw_mac, e)
                     return None, None
 
@@ -874,7 +872,7 @@ class DataWorker:
 
             logger.info(f"Cached VPN peers for {len(all_peers)} gateways (parallel)")
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error("Parallel VPN fetch failed: %s", e)
             # Fall back to sequential
             self._fetch_vpn_peers(gateways)
@@ -1126,7 +1124,7 @@ class DataWorker:
                             filtered = filter_null_zero(insights)
                             if filtered:
                                 results[res_key] = filtered
-                    except WORKER_ERRORS as e:
+                    except Exception as e:
                         logger.debug(
                             "Error fetching %s for %s/%s: %s",
                             res_key,
@@ -1200,7 +1198,7 @@ class DataWorker:
                 f"Cached multi-resolution insights: {len(wan_ports)} ports, {total_stored} total entries"
             )
 
-        except WORKER_ERRORS as e:
+        except Exception as e:
             logger.error("Parallel multi-resolution insights fetch failed: %s", e)
 
 

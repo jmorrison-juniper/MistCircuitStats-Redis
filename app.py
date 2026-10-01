@@ -10,7 +10,6 @@ import os
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
-from redis.exceptions import RedisError
 
 from redis_cache import RedisCache
 
@@ -24,8 +23,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-APP_ERRORS = (RedisError, RuntimeError, TypeError, ValueError, KeyError, AttributeError)
 
 app = Flask(__name__)
 
@@ -70,7 +67,7 @@ def api_status():
                 },
             }
         )
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting status: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -88,7 +85,7 @@ def api_organization():
                 jsonify({"success": False, "error": "No organization data in cache"}),
                 404,
             )
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting organization: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -103,7 +100,7 @@ def api_sites():
             return jsonify({"success": True, "data": sites})
         else:
             return jsonify({"success": False, "error": "No sites data in cache"}), 404
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting sites: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -115,7 +112,7 @@ def api_cache_stats():
         c = get_cache()
         stats = c.get_cache_stats()
         return jsonify({"success": True, "data": stats})
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting cache stats: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -144,7 +141,7 @@ def api_gateways():
                 ),
                 404,
             )
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting gateways: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -159,7 +156,7 @@ def api_vpn_peers(gateway_id, mac):
             return jsonify({"success": True, "data": peers})
         else:
             return jsonify({"success": True, "data": {}})  # Empty is OK
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting VPN peers: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -171,7 +168,7 @@ def api_all_vpn_peers():
         c = get_cache()
         all_peers = c.get_all_vpn_peers()
         return jsonify({"success": True, "data": all_peers})
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting all VPN peers: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -190,7 +187,7 @@ def api_insights(gateway_id, port_id):
             return jsonify({"success": True, "data": insights})
         else:
             return jsonify({"success": True, "data": {}})  # Empty is OK
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting insights: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -202,7 +199,7 @@ def api_all_insights():
         c = get_cache()
         all_insights = c.get_all_insights()
         return jsonify({"success": True, "data": all_insights})
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting all insights: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -286,7 +283,7 @@ def api_port_traffic(gateway_id, port_id):
                 },
             }
         )
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting port traffic: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -312,7 +309,7 @@ def api_token_status():
                 },
             }
         )
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting token status: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -324,7 +321,7 @@ def api_templates():
         c = get_cache()
         templates = c.get_all_gateway_templates()
         return jsonify({"success": True, "data": templates})
-    except APP_ERRORS as e:
+    except Exception as e:
         logger.error("Error getting templates: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -351,7 +348,7 @@ def health_check():
             ),
             code,
         )
-    except APP_ERRORS as e:
+    except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 503
 
 

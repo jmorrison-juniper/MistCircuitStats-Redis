@@ -19,8 +19,6 @@ import mistapi  # type: ignore[import-untyped]  # The Mist SDK has no type stubs
 
 logger = logging.getLogger(__name__)
 
-MIST_ERRORS = (RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError)
-
 
 class MistConnection:
     """Wrapper class for Mist API operations"""
@@ -146,8 +144,8 @@ class MistConnection:
                                     tokens_exhausted=idx + 1,
                                     total_tokens=self._token_count,
                                 )
-                            except MIST_ERRORS:
-                                pass  # Best effort
+                            except Exception as e:
+                                logger.debug("Could not report rate limit: %s", e)
                         continue
                     else:
                         logger.warning(
@@ -171,10 +169,10 @@ class MistConnection:
                                 tokens_exhausted=idx + 1,
                                 total_tokens=self._token_count,
                             )
-                        except MIST_ERRORS:
-                            pass  # Best effort
+                        except Exception as e:
+                            logger.debug("Could not report rate limit: %s", e)
                     continue
-                except MIST_ERRORS as e:
+                except Exception as e:
                     logger.warning(f"Token {idx + 1}/{len(token_list)} failed: {e}")
                     last_error = e
                     continue
@@ -190,7 +188,7 @@ class MistConnection:
                         logger.warning(
                             f"All {self._token_count} tokens exhausted - rate limit reported"
                         )
-                    except MIST_ERRORS as rl_err:
+                    except Exception as rl_err:
                         logger.debug("Could not report rate limit: %s", rl_err)
                 raise last_error or RuntimeError("All tokens failed to initialize")
 
@@ -214,8 +212,8 @@ class MistConnection:
         try:
             if hasattr(self.apisession, "_apitoken_index"):
                 return self.apisession._apitoken_index
-        except MIST_ERRORS:
-            pass
+        except Exception as e:
+            logger.debug("Could not read current token index: %s", e)
         return getattr(self, "_current_token_idx", 0)
 
     def _report_rate_limit(self, tokens_exhausted: int = 0):
@@ -230,7 +228,7 @@ class MistConnection:
                 logger.warning(
                     f"Rate limit reported: {tokens_exhausted}/{self._token_count} tokens exhausted"
                 )
-            except MIST_ERRORS as e:
+            except Exception as e:
                 logger.debug("Could not report rate limit to Redis: %s", e)
 
     def _clear_rate_limit(self):
@@ -238,7 +236,7 @@ class MistConnection:
         if self._redis_cache:
             try:
                 self._redis_cache.clear_rate_limit_status()
-            except MIST_ERRORS as e:
+            except Exception as e:
                 logger.debug("Could not clear rate limit in Redis: %s", e)
 
     def _auto_detect_org(self):
@@ -262,7 +260,7 @@ class MistConnection:
                 logger.info(f"Auto-detected org_id: {self.org_id}")
             else:
                 raise ValueError("No organizations found in user privileges")
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error auto-detecting org_id: {e!s}")
             raise
 
@@ -283,7 +281,7 @@ class MistConnection:
                 }
             else:
                 raise RuntimeError(f"API error: {response.status_code}")
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error getting organization info: {e!s}")
             raise
 
@@ -308,7 +306,7 @@ class MistConnection:
                 return orgs
             else:
                 raise RuntimeError(f"API error: {response.status_code}")
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error getting organizations: {e!s}")
             raise
 
@@ -346,7 +344,7 @@ class MistConnection:
                     "token_count": token_count,
                     "current_token": current_token_idx,
                 }
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error getting API usage: {e!s}")
             return {
                 "requests": 0,
@@ -391,7 +389,7 @@ class MistConnection:
                 return sites
             else:
                 raise RuntimeError(f"API error: {response.status_code}")
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error getting sites: {e!s}")
             raise
 
@@ -451,7 +449,7 @@ class MistConnection:
                 logger.warning(
                     f"Could not fetch device config {device_id}: {config_response.status_code}"
                 )
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.warning(f"Error fetching device config {device_id}: {e!s}")
 
         return {}
@@ -529,7 +527,7 @@ class MistConnection:
             else:
                 logger.warning(f"Org inventory returned {response.status_code}")
 
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.warning(f"Error in batch inventory fetch: {e!s}")
 
         return inventory_data
@@ -587,7 +585,7 @@ class MistConnection:
                     f"Failed to fetch gateway templates: {response.status_code}"
                 )
                 MistConnection._all_gateway_templates = {}
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error("Error fetching gateway templates: %s", e)
             MistConnection._all_gateway_templates = {}
 
@@ -624,7 +622,7 @@ class MistConnection:
                     f"Failed to fetch device profiles: {response.status_code}"
                 )
                 MistConnection._all_device_profiles = {}
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error("Error fetching device profiles: %s", e)
             MistConnection._all_device_profiles = {}
 
@@ -669,7 +667,7 @@ class MistConnection:
                 logger.debug(
                     f"Site {site_id}: fetched {len(result['configs'])} device configs"
                 )
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.warning("Error fetching device configs for site %s: %s", site_id, e)
 
         # 2. Fetch all gateway runtime stats for this site (1 API call)
@@ -694,7 +692,7 @@ class MistConnection:
                 logger.debug(
                     f"Site {site_id}: fetched {len(result['runtime'])} device runtime stats"
                 )
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.warning("Error fetching runtime stats for site %s: %s", site_id, e)
 
         return result
@@ -815,7 +813,7 @@ class MistConnection:
                 logger.warning(
                     f"Could not fetch device profile {deviceprofile_id}: {response.status_code}"
                 )
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.warning(f"Error fetching device profile {deviceprofile_id}: {e!s}")
 
         MistConnection._device_profile_cache[cache_key] = {}
@@ -876,7 +874,7 @@ class MistConnection:
                 logger.warning(
                     f"Could not fetch gateway template {gatewaytemplate_id}: {response.status_code}"
                 )
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.warning(
                 f"Error fetching gateway template {gatewaytemplate_id}: {e!s}"
             )
@@ -1012,7 +1010,7 @@ class MistConnection:
                 )  # Map of port_id -> actual runtime IP/netmask from if_stat
 
                 # Get profile ID from batch inventory
-                inventory_data = inventory_map.get(gw_mac, {})
+                inventory_data = inventory_map.get(gw_mac, {}) if gw_mac else {}
                 deviceprofile_id = inventory_data.get("deviceprofile_id")
 
                 try:
@@ -1156,7 +1154,7 @@ class MistConnection:
 
                                         # Always store runtime data for WAN ports
                                         runtime_ips_by_port[port_id] = runtime_entry
-                except MIST_ERRORS as e:
+                except Exception as e:
                     logger.warning(
                         f"Could not process config for gateway {gw_id}: {e!s}"
                     )
@@ -1414,7 +1412,7 @@ class MistConnection:
                 )
 
             return gateway_stats
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error getting gateway stats: {e!s}")
             raise
 
@@ -1466,7 +1464,7 @@ class MistConnection:
                 }
             else:
                 raise RuntimeError(f"API error: {response.status_code}")
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error getting gateway port stats: {e!s}")
             raise
 
@@ -1539,7 +1537,7 @@ class MistConnection:
                     f"VPN peer stats API error {response.status_code} for device {device_mac}"
                 )
                 return {"success": False, "peers_by_port": {}, "total_peers": 0}
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.warning(
                 f"Error fetching VPN peer stats for device {device_mac}: {e!s}"
             )
@@ -1581,8 +1579,8 @@ class MistConnection:
                 token_idx = getattr(self.apisession, "_apitoken_index", 0)
                 if tokens and len(tokens) > token_idx >= 0:
                     current_token = tokens[token_idx]
-            except MIST_ERRORS:
-                pass
+            except Exception as e:
+                logger.debug("Could not read active Mist API token: %s", e)
 
             headers = {
                 "Authorization": f"Token {current_token}",
@@ -1623,9 +1621,9 @@ class MistConnection:
                         from datetime import datetime
 
                         try:
-                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                            dt = datetime.fromisoformat(ts)
                             unix_timestamps.append(int(dt.timestamp()))
-                        except MIST_ERRORS:
+                        except Exception:
                             unix_timestamps.append(0)
                     else:
                         unix_timestamps.append(ts)
@@ -1659,7 +1657,7 @@ class MistConnection:
                 )
                 return None
 
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.warning(
                 "Error fetching gateway insights for %s/%s: %s", gateway_id, port_id, e
             )
@@ -1708,7 +1706,7 @@ class MistConnection:
             logger.info(f"Retrieved full data for {len(gateways)} gateways")
             return gateways
 
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error getting gateway device list: {e!s}")
             raise
 
@@ -1788,7 +1786,7 @@ class MistConnection:
             )
             return ports_by_device
 
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error getting port stats batch: {e!s}")
             raise
 
@@ -1840,7 +1838,7 @@ class MistConnection:
 
             return ports_by_device
 
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error getting port stats: {e!s}")
             raise
 
@@ -1887,7 +1885,7 @@ class MistConnection:
             logger.debug(f"Retrieved {len(all_ports)} ports for site {site_id}")
             return all_ports
 
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.error(f"Error getting site port stats for {site_id}: {e!s}")
             return []
 
@@ -1914,7 +1912,7 @@ class MistConnection:
         gw_site_id = gateway.get("site_id")
         gw_mac = gateway.get("mac")
 
-        if not gw_id or not gw_site_id or not gw_mac:
+        if not gw_id or not gw_site_id:
             return self._minimal_port_enrichment(wan_ports)
 
         port_configs = []
@@ -1923,7 +1921,7 @@ class MistConnection:
 
         try:
             # Get profile ID from inventory map
-            inventory_data = inventory_map.get(gw_mac, {})
+            inventory_data = inventory_map.get(gw_mac, {}) if gw_mac else {}
             deviceprofile_id = inventory_data.get("deviceprofile_id")
 
             # Get device configuration from BULK data (no API call)
@@ -1989,7 +1987,7 @@ class MistConnection:
 
             # Get runtime IPs from BULK data (no API call)
             runtime_device = self._get_runtime_stats_from_bulk(
-                gw_mac, site_data.get("runtime", {})
+                gw_mac or "", site_data.get("runtime", {})
             )
             if runtime_device and "if_stat" in runtime_device:
                 if_stat = runtime_device["if_stat"]
@@ -2016,7 +2014,7 @@ class MistConnection:
 
                         runtime_ips_by_port[port_id] = runtime_entry
 
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.warning(f"Could not get config for gateway {gw_id}: {e!s}")
             return self._minimal_port_enrichment(wan_ports)
 
@@ -2136,7 +2134,7 @@ class MistConnection:
 
         try:
             # Get profile ID from inventory map
-            inventory_data = inventory_map.get(gw_mac, {})
+            inventory_data = inventory_map.get(gw_mac, {}) if gw_mac else {}
             deviceprofile_id = inventory_data.get("deviceprofile_id")
 
             # Get device configuration for port_config and gatewaytemplate_id
@@ -2251,7 +2249,7 @@ class MistConnection:
                             # Always store runtime data for WAN ports
                             runtime_ips_by_port[port_id] = runtime_entry
 
-        except MIST_ERRORS as e:
+        except Exception as e:
             logger.warning(f"Could not get config for gateway {gw_id}: {e!s}")
             return self._minimal_port_enrichment(wan_ports)
 
