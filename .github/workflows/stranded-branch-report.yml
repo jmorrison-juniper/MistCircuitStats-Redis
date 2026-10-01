@@ -1,0 +1,49 @@
+name: Stranded Branch Report
+
+# Report a branch that holds commits above `main` and has no open pull request.
+#
+# A branch with no pull request has one copy. A cleanup deletes that copy, and
+# git prints no warning. The repository squash-merges, so `git branch --merged`
+# never reports a feature branch as merged, and a cleanup that trusts `--merged`
+# is unsafe.
+#
+# Only `refs/pull/<n>/head` survives a branch deletion. This job names every
+# branch that lacks that protection, and it keeps one open issue with the list.
+#
+# The shared workflow in misthelper-devtools runs the stranded-branch-report
+# command and keeps the tracking issue current.
+
+on:
+  schedule:
+    # Run every Monday at 07:00 UTC, before the working week starts.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      min_age_days:
+        description: "The quiet period in days. A younger branch is active work."
+        required: false
+        default: "7"
+
+# WHY this group: a manual run and a scheduled run must not write the same issue
+# at the same time, because the second write would duplicate the report.
+concurrency:
+  group: stranded-branch-report
+  cancel-in-progress: false
+
+# The job below states the permissions that it needs. The empty map here
+# removes every other permission.
+permissions: {}
+
+jobs:
+  stranded-branch-report:
+    permissions:
+      # The job checks out the command.
+      contents: read
+      # The job opens, comments on, and closes the tracking issue.
+      issues: write
+      # The report reads the open pull requests.
+      pull-requests: read
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-stranded-branch-report.yml@b140350ebc40e61b57a3a65731c0df520f143661 # v0.6.0
+    with:
+      # A scheduled run has no inputs, so it reads the default.
+      min-age-days: ${{ fromJSON(github.event.inputs.min_age_days || '7') }}
