@@ -11,7 +11,7 @@ This version separates API fetching (worker) from serving (web app) to support m
 - **Redis**: AOF persistence for data durability across restarts
 - Flask with application factory pattern
 - mistapi SDK for Mist API integration
-- Bootstrap 5.3.2 dark theme with T-Mobile magenta accent (#E20074)
+- Bootstrap 5.3.8 dark theme with T-Mobile magenta accent (#E20074)
 - Single-page application with vanilla JavaScript
 - Multi-architecture Docker containers (amd64/arm64)
 
@@ -85,9 +85,10 @@ This version separates API fetching (worker) from serving (web app) to support m
 - Test locally: `docker-compose -f docker-compose.dev.yml up`
 
 ## Dependency Management
-- `mistapi` requires `python-dotenv>=0.15.0,<0.17` (not 1.0+)
-- `redis>=5.0.0` for Python Redis client
+- `redis>=8.1.0,<9` for Python Redis client
 - `schedule` for worker scheduling
+- `mistapi` requires `python-dotenv>=1.1.0`; keep the direct runtime requirement compatible
+- Keep the Redis server image on the supported Redis 8 major line
 - Always check for dependency conflicts when updating
 
 ## Git Repository Management

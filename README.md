@@ -106,10 +106,13 @@ python -m venv .venv
 source .venv/bin/activate
 
 # Install dependencies
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
+
+# Run the offline application tests
+python -m pytest tests
 
 # Start Redis (using Docker)
-docker run -d -p 6379:6379 redis:7-alpine
+docker run -d -p 6379:6379 redis:8-alpine
 
 # Copy and configure environment
 cp .env.example .env
@@ -122,6 +125,8 @@ python worker.py
 python app.py
 ```
 
+The automated tests use an in-memory Redis substitute and do not contact Mist or a Redis server.
+
 ### Project Structure
 
 ```
@@ -132,6 +137,7 @@ MistCircuitStats-Redis/
 ├── mist_connection.py  # Mist API connection handler
 ├── templates/
 │   └── index.html      # Dashboard template
+├── tests/              # Offline automated tests
 ├── docker-compose.yml  # Production Docker setup
 ├── docker-compose.dev.yml  # Development Docker setup
 ├── Dockerfile
@@ -347,7 +353,7 @@ volumes:
 |--------------|--------|-------------|
 | `mistapi.api.v1.sites.insights.getSiteInsightMetricsForGateway` | GET | Port traffic time-series metrics (rx_bps, tx_bps) |
 
-> **Note**: Gateway insights requires mistapi >= 0.59.3. Parameters: `site_id`, `device_id`, `metric` (e.g., 'rx_bps'), `start`, `end`, `interval`. For port-specific data, use the REST endpoint `/api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats` with `port_id` parameter.
+> **Note**: Gateway insights requires mistapi >= 0.64.0. Parameters: `site_id`, `device_id`, `metric` (e.g., 'rx_bps'), `start`, `end`, `interval`. For port-specific data, use the REST endpoint `/api/v1/sites/{site_id}/insights/gateway/{gateway_id}/stats` with `port_id` parameter.
 
 ## License
 

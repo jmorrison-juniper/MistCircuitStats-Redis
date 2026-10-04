@@ -5,10 +5,11 @@
 # a devtools release commit, and name the release tag in the comment.
 -r requirements.txt
 bandit>=1.9.4,<2
-black>=26.5.1,<27
-mypy>=1.19,<2
+black>=26.10.0,<27
+mypy>=2.4.0,<3
 pip-audit>=2.10.1,<3
-ruff>=0.16.9,<0.17
-types-requests>=2.32.4,<3
+pytest>=9.1.1,<10
+ruff>=0.16.10,<0.17
+types-requests>=2.33.0.20260906,<3
 vulture>=2.16,<3
 misthelper-devtools @ git+https://github.com/jmorrison-juniper/misthelper-devtools@b140350ebc40e61b57a3a65731c0df520f143661  # v0.6.0
