@@ -3,7 +3,7 @@ version: '3.8'
 
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: mist-redis-dev
     command: redis-server --appendonly yes
     ports:

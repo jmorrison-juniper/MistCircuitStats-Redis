@@ -2,7 +2,7 @@
 services:
   # Redis with RDB snapshots + AOF for durability
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: mist-redis
     command: redis-server --appendonly yes --save 60 1 --save 300 10
     volumes:
