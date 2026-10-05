@@ -1,40 +1,46 @@
-name: STE Writing Lint
-
-# Grade documentation prose against the Simplified Technical English rules. The
-# job fails when a graded file scores below the threshold. Widen the file list to
-# cover more documents as they reach the standard.
+# ================================================================
+# STE lint -- grade the agent instructions and the README
+# ================================================================
+# Copy this file to `.github/workflows/ste-lint.yml` in a repository. It calls
+# the shared `reusable-ste-lint.yml` workflow of misthelper-devtools, which
+# grades each named file with `ste-linter` and fails when a file scores below
+# `min-score`. The job has no ASD-STE100 dictionary, so it runs the structural
+# rules only. Grade the same files with a dictionary on your own machine too.
 #
-# The shared workflow in misthelper-devtools installs the linter at the pinned
-# commit and grades each file. A change to requirements-dev.txt therefore does
-# not change this job.
+# The `uses:` line pins a full commit SHA of misthelper-devtools, and the
+# comment after it names the release. This copy pins the commit that added the
+# agent instruction templates, which is the main tip after v0.6.1.
+# Re-pin the SHA and the comment together when you adopt a later release, and
+# let Dependabot move the pin with a `github-actions` entry in
+# `.github/dependabot.yml`.
+# ================================================================
+name: STE lint
 
+# The workflow has no `paths` filter. Branch protection can require the
+# `STE compliance` check, and a filtered workflow never starts on a pull
+# request that changes other files, so the check never reports and the pull
+# request blocks. The job costs about one minute.
 on:
+  push:
+    branches: [main]
   pull_request:
-    paths:
-      - "README.md"
-      - ".github/copilot-instructions.md"
-      - ".github/workflows/ste-lint.yml"
   workflow_dispatch:
 
-# WHY this group: a second push to the same pull request must cancel the first
-# grading run. This workflow reports no required check, so a cancelled run
-# blocks no merge.
+# One event starts one run: the push trigger is scoped to `main`, and a pull
+# request starts its own run. A new commit cancels the previous run on a
+# branch, but never on `main`.
 concurrency:
-  group: ste-lint-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# The job below states the permissions that it needs. The empty map here
-# removes every other permission.
 permissions: {}
 
 jobs:
   ste-lint:
     permissions:
-      # The job reads the files that it grades.
       contents: read
-    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-ste-lint.yml@b140350ebc40e61b57a3a65731c0df520f143661 # v0.6.0
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-ste-lint.yml@d00c9af1fccafe5858b76ad088a22ed8b046f8ae # main after v0.6.1, adds templates/agent-instructions
     with:
-      files: |
-        README.md
-        .github/copilot-instructions.md
+      files: README.md AGENTS.md .github/copilot-instructions.md
+      config: .ste-linter.toml
       min-score: 80

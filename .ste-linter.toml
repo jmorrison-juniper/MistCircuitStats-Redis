@@ -1,0 +1,37 @@
+# Shared settings for the STE writing linter of misthelper-devtools.
+#
+# Copy this file to `.ste-linter.toml` at the root of a repository. The
+# `ste-lint.yml` caller workflow and the pre-commit hook read it with
+# `--config .ste-linter.toml`.
+#
+# The ASD-STE100 dictionary is copyrighted, so no repository holds it. This
+# file names no `dictionary` path. Without the key, the linter looks for a
+# user-level copy, for example `~/.local/share/ste-linter/ste_dictionary.json`.
+# With a copy, the linter also runs the vocabulary rules and reports
+# `dictionary: used`. Without a copy, as in CI, it runs the structural rules
+# only and reports `dictionary: skipped`. A file must score 80 or above in
+# both modes.
+[tool.ste_linter]
+min_score = 80
+prefer_spacy = true
+# Approved technical terms that the dictionary rules must not flag. These are
+# correct programming, git, and GitHub words that are not in the general
+# ASD-STE100 vocabulary. The allowlist raises the signal so the linter flags
+# ordinary prose words, not normal software terms. Keep the list sorted and
+# lower case. Rewrite ordinary prose instead of adding it here.
+allowlist = [
+    "action", "api", "async", "attribute", "backend", "backup", "block", "boolean",
+    "branch", "buffer", "build", "cache", "call", "callable", "checksum", "cli",
+    "commit", "config", "conflict", "copy", "csv", "daemon", "debug", "decorator",
+    "dispatch", "dns", "endpoint", "enum", "env", "exception", "fail", "failed",
+    "failure", "file", "filter", "finding", "firmware", "frontend", "getter",
+    "github", "gui", "hash", "http", "https", "id", "int", "iterable", "job",
+    "json", "key", "kwarg", "label", "lan", "link", "lint", "list", "log", "mac",
+    "markdown", "merge", "metadata", "middleware", "mock", "module", "namespace",
+    "org", "param", "parser", "payload", "pip", "port", "prompt", "proxy", "pull",
+    "push", "query", "regex", "release", "repo", "request", "retry", "return",
+    "run", "schedule", "schema", "security", "session", "setter", "socket", "sql",
+    "ssh", "stub", "tag", "tcp", "thread", "timeout", "timestamp", "token",
+    "trace", "traceback", "tui", "tuple", "udp", "url", "uuid", "variable",
+    "venv", "vpn", "wan", "wrap", "wrapper",
+]
