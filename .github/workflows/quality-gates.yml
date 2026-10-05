@@ -10,9 +10,10 @@ on:
 permissions:
   contents: read
 
+# A new commit cancels the previous run on a branch, but never on main.
 concurrency:
   group: quality-gates-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # The shared workflow in misthelper-devtools runs each gate as its own job.
