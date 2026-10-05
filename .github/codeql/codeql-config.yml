@@ -1,0 +1,3 @@
+# The CodeQL workflow reads this file. The repository has no test fixtures or
+# generated code, so the analysis examines each Python file.
+name: "MistCircuitStats-Redis CodeQL Configuration"

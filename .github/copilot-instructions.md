@@ -94,9 +94,21 @@ The Dockerfile sets `appuser` as the user. Keep `--no-control-socket` in the pro
 
 ## Git and GitHub in this repository
 
-The `Quality Gates` workflow runs Ruff, Black, mypy, pytest, Bandit, pip-audit, Radon, and Vulture. The `STE lint` workflow grades `README.md`, `AGENTS.md`, and this file. The `Build and Push Multi-Arch Container` workflow builds on pushes to `main`, version tags, and manual runs. Its default platforms are `linux/amd64` and `linux/arm64`. The `Stranded Branch Report` workflow runs each Monday.
+The `Quality Gates` workflow runs Ruff, Black, mypy, pytest, Bandit, pip-audit, Radon, and Vulture. The `STE lint` workflow grades `README.md`, `AGENTS.md`, and this file. The `Build and Push Multi-Arch Container` workflow builds on pushes to `main`, version tags, and manual runs. Its default platforms are `linux/amd64` and `linux/arm64`. The `Stranded Branch Report` workflow runs each Monday. The `CodeQL` workflow examines the Python code and sends the alerts to the Security tab.
 
-Use `YY.MM.DD.HH.MM` in UTC for release tags. The repository uses `ci` and `documentation` labels. It has no separate issue type or scope label scheme, pull request template, changelog, CodeQL workflow, or `auto-merge` label.
+| Workflow file | Workflow name | Runs on |
+| - | - | - |
+| `quality-gates.yml` | `Quality Gates` | Pull requests, pushes to `main`, and manual runs |
+| `ste-lint.yml` | `STE lint` | Pull requests, pushes to `main`, and manual runs |
+| `codeql.yml` | `CodeQL` | Pull requests, pushes to `main`, each Monday, and manual runs |
+| `build-and-push.yml` | `Build and Push Multi-Arch Container` | Pushes to `main`, version tags, and manual runs |
+| `stranded-branch-report.yml` | `Stranded Branch Report` | Each Monday and manual runs |
+
+Each workflow calls a shared workflow of misthelper-devtools. Each pin names release v0.6.2 at commit `da02d4c6`. The `requirements-dev.txt` pin names the same commit. Change each pin and its release comment together, then run `devtools-pin-check`.
+
+Branch protection on `main` requires the `gates / ...` checks of the `Quality Gates` workflow. The `CodeQL` workflow reports the `codeql / Analyze (python)` check and the `CodeQL` code scanning check. The owner adds these two checks to the required list after the first green CodeQL run on `main`. Do not change branch protection yourself.
+
+Use `YY.MM.DD.HH.MM` in UTC for release tags. The repository uses `ci` and `documentation` labels. It has no separate issue type or scope label scheme, pull request template, changelog, or `auto-merge` label.
 
 Issue #18 added the Radon gate with a maximum complexity of 15. Pull request #21 added `--no-control-socket` after Gunicorn failed to write its default socket as `appuser`. Pull request #23 reduced complexity in `worker.py`.
 
