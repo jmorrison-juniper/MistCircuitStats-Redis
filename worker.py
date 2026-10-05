@@ -375,6 +375,26 @@ class DataWorker:
             logger.error("Error fetching gateway list: %s", e)
             return []
 
+    @staticmethod
+    def _wan_ports_by_mac(site_ports: list[dict]) -> dict[str, list[dict]]:
+        ports_by_mac: dict[str, list[dict]] = {}
+        for port in site_ports:
+            if port.get("port_usage") != "wan":
+                continue
+            mac = port.get("mac")
+            if mac:
+                ports_by_mac.setdefault(mac, []).append(port)
+
+        return ports_by_mac
+
+    def _fetch_ports_without_sites(self, gateways: list[dict], by_mac: dict) -> None:
+        ports_by_device = self.mist.get_port_stats_paginated()
+        for mac, ports in ports_by_device.items():
+            if mac in by_mac:
+                by_mac[mac]["ports"] = ports
+                by_mac[mac]["_basic_only"] = False
+        self.cache.set_gateways(gateways, ttl=self.cache_ttl)
+
     def _fetch_port_stats_incremental(self, gateways: list):
         """
         Fetch port statistics per-site and update cached gateways incrementally.
@@ -391,13 +411,7 @@ class DataWorker:
             sites = self.cache.get_sites() or []
             if not sites:
                 logger.warning("No sites in cache, falling back to org-level fetch")
-                # Fallback to org-level if no sites
-                ports_by_device = self.mist.get_port_stats_paginated()
-                for mac, ports in ports_by_device.items():
-                    if mac in gateway_by_mac:
-                        gateway_by_mac[mac]["ports"] = ports
-                        gateway_by_mac[mac]["_basic_only"] = False
-                self.cache.set_gateways(gateways, ttl=self.cache_ttl)
+                self._fetch_ports_without_sites(gateways, gateway_by_mac)
                 return
 
             # Pre-fetch inventory map for all gateways (used for enrichment)
@@ -431,34 +445,18 @@ class DataWorker:
                     site_ports = self.mist.get_site_port_stats(site_id)
 
                     if site_ports:
-                        # Group WAN ports by device MAC (filter out non-WAN ports)
-                        site_ports_by_mac: dict[str, list[dict]] = {}
-                        for port in site_ports:
-                            # Only include WAN ports
-                            if port.get("port_usage") != "wan":
-                                continue
-                            mac = port.get("mac")
-                            if mac:
-                                if mac not in site_ports_by_mac:
-                                    site_ports_by_mac[mac] = []
-                                site_ports_by_mac[mac].append(port)
-
-                        # Enrich and assign to gateways using OPTIMIZED bulk method
-                        for mac, raw_ports in site_ports_by_mac.items():
+                        for mac, raw_ports in self._wan_ports_by_mac(
+                            site_ports
+                        ).items():
                             if mac in gateway_by_mac:
                                 gateway = gateway_by_mac[mac]
-                                # OPTIMIZATION: Use bulk-enriched method (no per-device API calls)
-                                enriched_ports = (
-                                    self.mist.enrich_gateway_ports_optimized(
-                                        gateway, raw_ports, inventory_map, site_data
-                                    )
+                                enriched = self.mist.enrich_gateway_ports_optimized(
+                                    gateway, raw_ports, inventory_map, site_data
                                 )
-                                gateway["ports"] = enriched_ports
-                                gateway["num_ports"] = len(
-                                    enriched_ports
-                                )  # For frontend display
+                                gateway["ports"] = enriched
+                                gateway["num_ports"] = len(enriched)
                                 gateway["_basic_only"] = False
-                                total_ports += len(enriched_ports)
+                                total_ports += len(enriched)
                                 devices_with_ports += 1
 
                         # Incremental cache update after each site
@@ -572,6 +570,32 @@ class DataWorker:
         except Exception as e:
             logger.error("Error in VPN peers fetch: %s", e)
 
+    def _insight_headers(self) -> dict[str, str]:
+        current_token = self.mist.api_token.split(",")[0].strip()
+        try:
+            tokens = getattr(self.mist.apisession, "_apitoken", None)
+            token_idx = getattr(self.mist.apisession, "_apitoken_index", 0)
+            if tokens and len(tokens) > token_idx >= 0:
+                current_token = tokens[token_idx]
+        except Exception as e:
+            logger.debug("Could not read active Mist API token: %s", e)
+        return {
+            "Authorization": f"Token {current_token}",
+            "Content-Type": "application/json",
+        }
+
+    @staticmethod
+    def _legacy_insight_data(data: dict, interval: int) -> dict:
+        rx_bps = data.get("rx_bps", [])
+        tx_bps = data.get("tx_bps", [])
+        return {
+            "rx_bytes": sum(bps * interval for bps in rx_bps if bps) // 8,
+            "tx_bytes": sum(bps * interval for bps in tx_bps if bps) // 8,
+            "rx_bps": rx_bps,
+            "tx_bps": tx_bps,
+            "timestamps": data.get("timestamps", []),
+        }
+
     def _fetch_insights(self, gateways: list):
         """Fetch traffic insights for all gateway ports"""
         try:
@@ -590,20 +614,7 @@ class DataWorker:
             for gw in gateways:
                 total_ports += len(gw.get("ports", []))
 
-            # Get current token for API calls
-            current_token = self.mist.api_token.split(",")[0].strip()
-            try:
-                tokens = getattr(self.mist.apisession, "_apitoken", None)
-                token_idx = getattr(self.mist.apisession, "_apitoken_index", 0)
-                if tokens and len(tokens) > token_idx >= 0:
-                    current_token = tokens[token_idx]
-            except Exception as e:
-                logger.debug("Could not read active Mist API token: %s", e)
-
-            headers = {
-                "Authorization": f"Token {current_token}",
-                "Content-Type": "application/json",
-            }
+            headers = self._insight_headers()
 
             for gw in gateways:
                 site_id = gw.get("site_id")
@@ -636,25 +647,9 @@ class DataWorker:
                         )
 
                         if response.status_code == 200:
-                            data = response.json()
-                            rx_bps_list = data.get("rx_bps", [])
-                            tx_bps_list = data.get("tx_bps", [])
-
-                            # Calculate total bytes
-                            rx_bytes = (
-                                sum(bps * interval for bps in rx_bps_list if bps) // 8
+                            all_insights[gateway_id][port_id] = (
+                                self._legacy_insight_data(response.json(), interval)
                             )
-                            tx_bytes = (
-                                sum(bps * interval for bps in tx_bps_list if bps) // 8
-                            )
-
-                            all_insights[gateway_id][port_id] = {
-                                "rx_bytes": rx_bytes,
-                                "tx_bytes": tx_bytes,
-                                "rx_bps": rx_bps_list,
-                                "tx_bps": tx_bps_list,
-                                "timestamps": data.get("timestamps", []),
-                            }
 
                     except Exception as e:
                         logger.warning(
@@ -877,6 +872,21 @@ class DataWorker:
             # Fall back to sequential
             self._fetch_vpn_peers(gateways)
 
+    @staticmethod
+    def _insight_fetch_window(
+        now: int,
+        target_start: int,
+        first_ts: int,
+        last_ts: int,
+        gap_at_end: int,
+        data_span_days: float,
+    ) -> tuple[int, int, int]:
+        if gap_at_end > 60 * 60:
+            return 2, last_ts, now
+        if data_span_days < 6.5:
+            return 3, target_start, first_ts if first_ts else now
+        return 4, now - (24 * 60 * 60), now
+
     def _analyze_port_data_needs(self, gw_id: str, port_id: str) -> dict:
         """
         Analyze existing cached data to determine what needs to be fetched.
@@ -929,20 +939,9 @@ class DataWorker:
         stale_threshold = 15 * 60  # 15 minutes
         gap_at_end = max(0, now - last_ts - stale_threshold) if last_ts else 0
 
-        # Determine priority
-        if gap_at_end > 60 * 60:  # More than 1 hour of missing recent data
-            priority = 2
-            fetch_start = last_ts  # Fetch from where we left off
-            fetch_end = now
-        elif data_span_days < 6.5:  # Less than ~7 days
-            priority = 3
-            # Fetch older data to fill gap at start
-            fetch_start = target_start
-            fetch_end = first_ts if first_ts else now
-        else:
-            priority = 4  # Have good coverage, just refresh recent
-            fetch_start = now - (24 * 60 * 60)  # Last 24 hours
-            fetch_end = now
+        priority, fetch_start, fetch_end = self._insight_fetch_window(
+            now, target_start, first_ts, last_ts, gap_at_end, data_span_days
+        )
 
         return {
             "has_data": True,
@@ -955,6 +954,23 @@ class DataWorker:
             "fetch_start": fetch_start,
             "fetch_end": fetch_end,
         }
+
+    @staticmethod
+    def _add_insight_points(data: dict, combined: dict) -> None:
+        for i, timestamp in enumerate(data.get("timestamps", [])):
+            if timestamp:
+                combined[timestamp] = {
+                    "rx_bps": (
+                        data.get("rx_bps", [])[i]
+                        if i < len(data.get("rx_bps", []))
+                        else 0
+                    ),
+                    "tx_bps": (
+                        data.get("tx_bps", [])[i]
+                        if i < len(data.get("tx_bps", []))
+                        else 0
+                    ),
+                }
 
     def _merge_insights(self, existing: dict, new_data: dict) -> dict:
         """
@@ -969,39 +985,10 @@ class DataWorker:
             return existing
 
         # Combine all data points
-        combined = {}
+        combined: dict = {}
 
-        # Add existing data
-        for i, ts in enumerate(existing.get("timestamps", [])):
-            if ts:
-                combined[ts] = {
-                    "rx_bps": (
-                        existing.get("rx_bps", [])[i]
-                        if i < len(existing.get("rx_bps", []))
-                        else 0
-                    ),
-                    "tx_bps": (
-                        existing.get("tx_bps", [])[i]
-                        if i < len(existing.get("tx_bps", []))
-                        else 0
-                    ),
-                }
-
-        # Add/update with new data (new data takes precedence for same timestamp)
-        for i, ts in enumerate(new_data.get("timestamps", [])):
-            if ts:
-                combined[ts] = {
-                    "rx_bps": (
-                        new_data.get("rx_bps", [])[i]
-                        if i < len(new_data.get("rx_bps", []))
-                        else 0
-                    ),
-                    "tx_bps": (
-                        new_data.get("tx_bps", [])[i]
-                        if i < len(new_data.get("tx_bps", []))
-                        else 0
-                    ),
-                }
+        self._add_insight_points(existing, combined)
+        self._add_insight_points(new_data, combined)
 
         # Sort by timestamp and rebuild arrays
         sorted_timestamps = sorted(combined.keys())
@@ -1019,6 +1006,26 @@ class DataWorker:
         result["tx_bytes"] = sum(bps * interval for bps in result["tx_bps"] if bps) // 8
 
         return result
+
+    @staticmethod
+    def _wan_ports_for_insights(gateways: list[dict]) -> list[tuple[str, str, str]]:
+        wan_ports = []
+        for gateway in gateways:
+            gateway_id = gateway.get("id")
+            site_id = gateway.get("site_id")
+            for port in gateway.get("ports", []):
+                usage = port.get("port_usage") or port.get("usage", "")
+                if usage == "wan":
+                    port_id = port.get("port_id")
+                    if gateway_id and port_id and site_id:
+                        wan_ports.append((gateway_id, site_id, port_id))
+        return wan_ports
+
+    @staticmethod
+    def _insight_byte_total(
+        samples: list[int | float | None], interval: int
+    ) -> int | float:
+        return sum(bps * interval for bps in samples if bps) // 8
 
     def _fetch_insights_parallel(self, gateways: list):
         """
@@ -1051,17 +1058,7 @@ class DataWorker:
             all_insights: dict[str, dict[str, dict[str, dict]]] = {}
             processed = [0]
 
-            # Build list of WAN ports
-            wan_ports = []
-            for gw in gateways:
-                gw_id = gw.get("id")
-                site_id = gw.get("site_id")
-                for port in gw.get("ports", []):
-                    port_usage = port.get("port_usage") or port.get("usage", "")
-                    if port_usage == "wan":
-                        port_id = port.get("port_id")
-                        if gw_id and port_id and site_id:
-                            wan_ports.append((gw_id, site_id, port_id))
+            wan_ports = self._wan_ports_for_insights(gateways)
 
             total_requests = len(wan_ports) * len(resolutions)
             logger.info(
@@ -1100,8 +1097,8 @@ class DataWorker:
                     "timestamps": filtered_ts,
                     "rx_bps": filtered_rx,
                     "tx_bps": filtered_tx,
-                    "rx_bytes": sum(bps * interval for bps in filtered_rx if bps) // 8,
-                    "tx_bytes": sum(bps * interval for bps in filtered_tx if bps) // 8,
+                    "rx_bytes": self._insight_byte_total(filtered_rx, interval),
+                    "tx_bytes": self._insight_byte_total(filtered_tx, interval),
                     "interval": interval,
                 }
 

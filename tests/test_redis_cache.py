@@ -16,8 +16,12 @@ class InMemoryRedis:
         self.values[key] = value
         self.ttls[key] = ttl
 
-    def get(self, key: str) -> bytes | None:
-        value = self.values.get(key)
+    def set(self, key: str, value: str) -> None:
+        self.values[key] = value
+
+    def get(self, key: str | bytes) -> bytes | None:
+        normalized_key = key.decode() if isinstance(key, bytes) else key
+        value = self.values.get(normalized_key)
         return value.encode() if value is not None else None
 
     def keys(self, pattern: str) -> list[bytes]:
@@ -67,3 +71,69 @@ def test_insights_unknown_resolution_uses_seven_day_cache_key() -> None:
 
     assert cache.get_insights_by_resolution("gw-1", "wan0", "invalid") == insights
     assert "mist:insights:gw-1:wan0:7d" in client.values
+
+
+def test_cache_stats_counts_ports_peers_and_skips_malformed_entries() -> None:
+    cache, client = make_cache()
+    cache.set_gateways(
+        [
+            {"status": "connected", "ports": [{"up": True}, {"up": False}]},
+            {"status": "disconnected", "ports": [{"up": True}]},
+            {},
+        ]
+    )
+    cache.set_sites([{"id": "site"}])
+    cache.set_organization({"id": "org"})
+    cache.set_last_update(123.0)
+    cache.set_worker_status("idle")
+    cache.set_vpn_peers(
+        "gw", "mac", {"peers_by_port": {"wan0": [{}, {}], "wan1": [{}]}}
+    )
+    client.values["mist:vpn_peers:bad"] = "not json"
+    client.values["mist:vpn_peers:wrong-shape"] = "[]"
+    cache.set_insights("gw", "wan0", {"timestamps": [1]})
+    cache.set_device_profile("p", {})
+    cache.set_gateway_template("t", {})
+    stats = cache.get_cache_stats()
+    assert {
+        key: stats[key]
+        for key in (
+            "gateways_count",
+            "connected_count",
+            "total_ports",
+            "active_ports",
+            "sites_count",
+            "vpn_peers_count",
+            "insights_count",
+            "profiles_count",
+            "templates_count",
+        )
+    } == {
+        "gateways_count": 3,
+        "connected_count": 1,
+        "total_ports": 3,
+        "active_ports": 2,
+        "sites_count": 1,
+        "vpn_peers_count": 3,
+        "insights_count": 1,
+        "profiles_count": 1,
+        "templates_count": 1,
+    }
+    assert stats["has_org"] and stats["has_sites"] and stats["has_gateways"]
+    assert stats["last_update"] == 123.0
+    assert stats["worker_status"]["status"] == "idle"
+
+
+def test_cache_stats_empty_and_client_failure() -> None:
+    cache, client = make_cache()
+    stats = cache.get_cache_stats()
+    assert (
+        stats["gateways_count"] == stats["total_ports"] == stats["vpn_peers_count"] == 0
+    )
+    assert stats["last_update"] is None
+    assert stats["worker_status"] is None
+    client.values[cache.PREFIX_GATEWAYS] = "{}"
+    client.keys = lambda _pattern: (_ for _ in ()).throw(
+        RuntimeError("offline failure")
+    )
+    assert cache.get_cache_stats() == {}
