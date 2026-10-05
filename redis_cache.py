@@ -742,6 +742,20 @@ class RedisCache:
             logger.error("Error clearing cache: %s", e)
             return False
 
+    def _count_cached_vpn_peers(self, vpn_keys: list) -> int:
+        total = 0
+        if vpn_keys:
+            for key in vpn_keys:
+                try:
+                    data = self.client.get(key)
+                    if data:
+                        peers_by_port = json.loads(data).get("peers_by_port", {})
+                        for peers in peers_by_port.values():
+                            total += len(peers)
+                except Exception as e:
+                    logger.debug("Skipping malformed VPN peer cache entry: %s", e)
+        return total
+
     def get_cache_stats(self) -> dict[str, Any]:
         """Get cache statistics with actual counts"""
         try:
@@ -773,19 +787,7 @@ class RedisCache:
             profiles_keys = self.client.keys("mist:profiles:*")
             templates_keys = self.client.keys("mist:templates:*")
 
-            # Count total VPN peer paths (not just number of gateways with peers)
-            total_vpn_peers = 0
-            if vpn_keys:
-                for key in vpn_keys:
-                    try:
-                        data = self.client.get(key)
-                        if data:
-                            peer_data = json.loads(data)
-                            peers_by_port = peer_data.get("peers_by_port", {})
-                            for port_peers in peers_by_port.values():
-                                total_vpn_peers += len(port_peers)
-                    except Exception as e:
-                        logger.debug("Skipping malformed VPN peer cache entry: %s", e)
+            total_vpn_peers = self._count_cached_vpn_peers(vpn_keys)
 
             stats = {
                 "gateways_count": gateway_count,

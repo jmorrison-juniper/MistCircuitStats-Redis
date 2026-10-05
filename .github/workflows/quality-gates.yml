@@ -34,6 +34,7 @@ jobs:
       bandit: true
       bandit-args: -r . -ll -x ./.github,./templates
       pip-audit: true
+      radon: true
       vulture: true
       vulture-args: . --min-confidence 90 --exclude .github,templates
 

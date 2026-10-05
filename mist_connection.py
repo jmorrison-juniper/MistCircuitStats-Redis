@@ -13,7 +13,7 @@ import copy
 import logging
 import os
 import time
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import mistapi  # type: ignore[import-untyped]  # The Mist SDK has no type stubs.
 
@@ -46,6 +46,81 @@ class MistConnection:
 
     # API rate limiting delay (set via API_DELAY_MS env var, default 2ms)
     API_DELAY_SECONDS = float(os.environ.get("API_DELAY_MS", "2")) / 1000.0
+
+    def _initialize_session(self, token_list: list[str]) -> None:
+        """Try each token without relying on the SDK's initialization retry."""
+        last_error: BaseException | None = None
+        for idx, token in enumerate(token_list):
+            try:
+                logger.info(
+                    f"Trying to initialize with token {idx + 1}/{len(token_list)}"
+                )
+                self.apisession = mistapi.APISession(
+                    host=self.host,
+                    apitoken=token,
+                    console_log_level=30,
+                    logging_log_level=20,
+                )
+                response = mistapi.api.v1.self.self.getSelf(self.apisession)
+                time.sleep(self.API_DELAY_SECONDS)
+                if response.status_code == 200:
+                    self._activate_session_tokens(token_list, idx, response.data)
+                    return
+                if response.status_code == 429:
+                    logger.warning(
+                        f"Token {idx + 1}/{len(token_list)} rate limited, trying next..."
+                    )
+                    last_error = RuntimeError(f"Token {idx + 1} rate limited (429)")
+                    self._report_initialization_rate_limit(idx + 1)
+                else:
+                    logger.warning(
+                        f"Token {idx + 1}/{len(token_list)} returned {response.status_code}"
+                    )
+                    last_error = RuntimeError(
+                        f"Token {idx + 1} returned {response.status_code}"
+                    )
+            except SystemExit:
+                logger.warning(f"Token {idx + 1}/{len(token_list)} caused SDK to exit")
+                last_error = RuntimeError(f"Token {idx + 1} caused SDK exit")
+                self._report_initialization_rate_limit(idx + 1)
+            except Exception as e:
+                logger.warning(f"Token {idx + 1}/{len(token_list)} failed: {e}")
+                last_error = e
+        self._report_initialization_rate_limit(self._token_count, all_exhausted=True)
+        raise last_error or RuntimeError("All tokens failed to initialize")
+
+    def _activate_session_tokens(
+        self, token_list: list[str], idx: int, self_data: dict
+    ) -> None:
+        logger.info(f"Token {idx + 1}/{len(token_list)} working")
+        self._token_list = token_list
+        self._current_token_idx = idx
+        self._self_data: dict | None = self_data
+        self.apisession._apitoken = token_list
+        self.apisession._apitoken_index = idx
+        self.apisession._session.headers.update(
+            {"Authorization": "Token " + token_list[idx]}
+        )
+        logger.info(
+            f"Injected {len(token_list)} tokens into SDK, starting at index {idx}"
+        )
+
+    def _report_initialization_rate_limit(
+        self, tokens_exhausted: int, *, all_exhausted: bool = False
+    ) -> None:
+        if self._redis_cache:
+            try:
+                self._redis_cache.set_rate_limit_status(
+                    is_limited=True,
+                    tokens_exhausted=tokens_exhausted,
+                    total_tokens=self._token_count,
+                )
+                if all_exhausted:
+                    logger.warning(
+                        f"All {self._token_count} tokens exhausted - rate limit reported"
+                    )
+            except Exception as e:
+                logger.debug("Could not report rate limit: %s", e)
 
     def __init__(
         self,
@@ -90,108 +165,7 @@ class MistConnection:
         saved_token = os.environ.pop("MIST_APITOKEN", None)
 
         try:
-            # Try to initialize with each token until one succeeds
-            # The SDK has a bug where its 429 retry logic doesn't work correctly
-            # (the finally block overrides the return from the recursive retry call)
-            # So we implement our own token fallback during initialization
-            last_error: BaseException | None = None
-
-            for idx, token in enumerate(token_list):
-                try:
-                    logger.info(
-                        f"Trying to initialize with token {idx + 1}/{len(token_list)}"
-                    )
-                    self.apisession = mistapi.APISession(
-                        host=self.host,
-                        apitoken=token,
-                        console_log_level=30,  # WARNING  # type: ignore[arg-type]
-                        logging_log_level=20,  # INFO  # type: ignore[arg-type]
-                    )
-
-                    # Test if the token actually works with an API call
-                    test_response = mistapi.api.v1.self.self.getSelf(self.apisession)
-                    time.sleep(self.API_DELAY_SECONDS)  # Rate limiting delay
-                    if test_response.status_code == 200:
-                        logger.info(f"Token {idx + 1}/{len(token_list)} working")
-                        # Store all tokens for potential future manual rotation
-                        self._token_list = token_list
-                        self._current_token_idx = idx
-                        # Cache the self response for org_id detection
-                        self._self_data = test_response.data
-
-                        # IMPORTANT: Inject ALL tokens into the SDK for automatic rotation
-                        # The SDK stores tokens in _apitoken list and rotates on 429
-                        self.apisession._apitoken = token_list
-                        self.apisession._apitoken_index = idx
-                        # Update the session headers with current token
-                        self.apisession._session.headers.update(
-                            {"Authorization": "Token " + token}
-                        )
-                        logger.info(
-                            f"Injected {len(token_list)} tokens into SDK, starting at index {idx}"
-                        )
-                        break
-                    elif test_response.status_code == 429:
-                        logger.warning(
-                            f"Token {idx + 1}/{len(token_list)} rate limited, trying next..."
-                        )
-                        last_error = RuntimeError(f"Token {idx + 1} rate limited (429)")
-                        # Report incremental rate limit
-                        if self._redis_cache:
-                            try:
-                                self._redis_cache.set_rate_limit_status(
-                                    is_limited=True,
-                                    tokens_exhausted=idx + 1,
-                                    total_tokens=self._token_count,
-                                )
-                            except Exception as e:
-                                logger.debug("Could not report rate limit: %s", e)
-                        continue
-                    else:
-                        logger.warning(
-                            f"Token {idx + 1}/{len(token_list)} returned {test_response.status_code}"
-                        )
-                        last_error = RuntimeError(
-                            f"Token {idx + 1} returned {test_response.status_code}"
-                        )
-                        continue
-
-                except SystemExit:
-                    logger.warning(
-                        f"Token {idx + 1}/{len(token_list)} caused SDK to exit"
-                    )
-                    last_error = RuntimeError(f"Token {idx + 1} caused SDK exit")
-                    # Report rate limit for this token
-                    if self._redis_cache:
-                        try:
-                            self._redis_cache.set_rate_limit_status(
-                                is_limited=True,
-                                tokens_exhausted=idx + 1,
-                                total_tokens=self._token_count,
-                            )
-                        except Exception as e:
-                            logger.debug("Could not report rate limit: %s", e)
-                    continue
-                except Exception as e:
-                    logger.warning(f"Token {idx + 1}/{len(token_list)} failed: {e}")
-                    last_error = e
-                    continue
-            else:
-                # No token worked - report rate limit to Redis for GUI display
-                if self._redis_cache:
-                    try:
-                        self._redis_cache.set_rate_limit_status(
-                            is_limited=True,
-                            tokens_exhausted=self._token_count,
-                            total_tokens=self._token_count,
-                        )
-                        logger.warning(
-                            f"All {self._token_count} tokens exhausted - rate limit reported"
-                        )
-                    except Exception as rl_err:
-                        logger.debug("Could not report rate limit: %s", rl_err)
-                raise last_error or RuntimeError("All tokens failed to initialize")
-
+            self._initialize_session(token_list)
         finally:
             # Restore the environment variable
             if saved_token is not None:
@@ -555,7 +529,12 @@ class MistConnection:
 
         logger.info("Pre-fetching all gateway templates and device profiles...")
 
-        # Fetch all gateway templates (1 API call + pagination)
+        self._prefetch_gateway_templates()
+        self._prefetch_device_profiles()
+        MistConnection._bulk_cache_time = current_time
+
+    def _prefetch_gateway_templates(self) -> None:
+        """Fetch and persist gateway templates independently of profile failures."""
         try:
             response = mistapi.api.v1.orgs.gatewaytemplates.listOrgGatewayTemplates(
                 self.apisession, self.org_id, limit=1000  # type: ignore[arg-type]
@@ -589,7 +568,8 @@ class MistConnection:
             logger.error("Error fetching gateway templates: %s", e)
             MistConnection._all_gateway_templates = {}
 
-        # Fetch all device profiles for gateways (1 API call + pagination)
+    def _prefetch_device_profiles(self) -> None:
+        """Fetch and persist gateway profiles independently of template failures."""
         try:
             response = mistapi.api.v1.orgs.deviceprofiles.listOrgDeviceProfiles(
                 self.apisession,
@@ -625,8 +605,6 @@ class MistConnection:
         except Exception as e:
             logger.error("Error fetching device profiles: %s", e)
             MistConnection._all_device_profiles = {}
-
-        MistConnection._bulk_cache_time = current_time
 
     def prefetch_site_device_data(self, site_id: str) -> dict[str, dict]:
         """
@@ -882,6 +860,374 @@ class MistConnection:
         MistConnection._gateway_template_cache[cache_key] = {}
         return {}
 
+    def _template_port_config(
+        self,
+        profile_id: str | None,
+        template_id: str | None,
+        *,
+        cached: bool = False,
+        log_source: bool = False,
+        gateway_id: str | None = None,
+    ) -> dict:
+        if profile_id:
+            fetch_profile = (
+                self._get_device_profile_cached if cached else self._get_device_profile
+            )
+            data = fetch_profile(profile_id)
+        elif template_id:
+            fetch_template = (
+                self._get_gateway_template_cached
+                if cached
+                else self._get_gateway_template
+            )
+            data = fetch_template(template_id)
+        else:
+            return {}
+        if data and "port_config" in data:
+            merged = copy.deepcopy(data.get("port_config", {}))
+            if log_source:
+                source = (
+                    f"(Hub) using device profile {profile_id}"
+                    if profile_id
+                    else f"(Branch) using gateway template {template_id}"
+                )
+                logger.debug(f"Gateway {gateway_id} {source} with {len(merged)} ports")
+            return merged
+        return {}
+
+    @staticmethod
+    def _merge_device_ports(
+        merged: dict, device_ports: dict, overridden: set | None = None
+    ) -> set:
+        if overridden is None:
+            overridden = set()
+        if device_ports:
+            for name, config in device_ports.items():
+                overridden.add(name)
+                if name in merged:
+                    merged[name].update(config)
+                else:
+                    merged[name] = config
+        return overridden
+
+    @staticmethod
+    def _extract_wan_configs(merged: dict, wan_configs: dict) -> None:
+        for name, config in merged.items():
+            if config.get("usage") == "wan":
+                ip_config = config.get("ip_config", {})
+                vlan_id = config.get("vlan_id", "")
+                wan_configs[name] = {
+                    "name": config.get("name", ""),
+                    "description": config.get("description", "").strip(),
+                    "ip": ip_config.get("ip", ""),
+                    "netmask": ip_config.get("netmask", ""),
+                    "gateway": ip_config.get("gateway", ""),
+                    "template_type": ip_config.get("type", "dhcp"),
+                    "vlan_id": str(vlan_id) if vlan_id else "",
+                    "disabled": config.get("disabled", False),
+                }
+
+    @staticmethod
+    def _extract_runtime_ips(if_stat: dict, runtime_ips: dict) -> None:
+        # Mutate incrementally: callers retain earlier entries if a later IP is invalid.
+        for data in if_stat.values():
+            if data.get("port_usage") == "wan":
+                ips = data.get("ips", [])
+                entry = dict(data)
+                if ips and len(ips) > 0 and "/" in ips[0]:
+                    ip, cidr = ips[0].split("/")
+                    cidr_int = int(cidr)
+                    mask = (0xFFFFFFFF >> (32 - cidr_int)) << (32 - cidr_int)
+                    entry["ip"] = ip
+                    entry["netmask"] = (
+                        f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}."
+                        f"{(mask >> 8) & 0xff}.{mask & 0xff}"
+                    )
+                else:
+                    entry["ip"] = ""
+                    entry["netmask"] = ""
+                runtime_ips[data.get("port_id", "")] = entry
+
+    @staticmethod
+    def _match_wan_config(port_id: str, description: str, configs: dict) -> dict:
+        config = configs.get(port_id, {})
+        if not config:
+            for name, candidate in configs.items():
+                if name.startswith(port_id + "."):
+                    config = candidate
+                    break
+        if not config and description:
+            for candidate in configs.values():
+                if candidate.get("description") == description:
+                    config = candidate
+                    break
+        return config
+
+    @staticmethod
+    def _port_ip_address(config: dict, runtime: dict) -> tuple[str, str]:
+        if runtime and runtime.get("ip"):
+            ip = runtime.get("ip", "")
+            netmask = runtime.get("netmask", "")
+            if netmask and "." in netmask:
+                binary = "".join(
+                    bin(int(part) + 256)[3:] for part in netmask.split(".")
+                )
+                netmask = str(binary.count("1"))
+            return ip, netmask
+        return (
+            config.get("ip", "").strip(),
+            config.get("netmask", "").strip().removeprefix("/"),
+        )
+
+    @staticmethod
+    def _runtime_port_type(config: dict, runtime: dict) -> str:
+        mode = runtime.get("address_mode", "") if runtime else ""
+        return {"dynamic": "dhcp", "static": "static"}.get(
+            mode.lower(), config.get("template_type", "dhcp")
+        )
+
+    def _enriched_wan_port(
+        self,
+        port: dict,
+        port_id: str,
+        config: dict,
+        runtime: dict,
+        *,
+        device_override: bool = False,
+        include_errors: bool = False,
+    ) -> dict:
+        ip, netmask = self._port_ip_address(config, runtime)
+        template_type = config.get("template_type", "dhcp")
+        runtime_type = self._runtime_port_type(config, runtime)
+        overridden = runtime_type != template_type or device_override
+        result = {
+            "name": port_id,
+            "port_id": port_id,
+            "wan_name": config.get("name", ""),
+            "description": config.get("description", port.get("port_desc", "").strip()),
+            "enabled": not config.get("disabled", False),
+            "usage": "wan",
+            "ip": ip,
+            "netmask": netmask,
+            "gateway": config.get("gateway", ""),
+            "type": runtime_type,
+            "template_type": template_type,
+            "vlan_id": config.get("vlan_id", ""),
+            "override": "yes" if overridden else "no",
+            "up": port.get("up", False),
+            "rx_bytes": port.get("rx_bytes", 0),
+            "tx_bytes": port.get("tx_bytes", 0),
+            "rx_pkts": port.get("rx_pkts", 0),
+            "tx_pkts": port.get("tx_pkts", 0),
+            "speed": port.get("speed", 0),
+            "mac": port.get("port_mac", ""),
+        }
+        if include_errors:
+            result["rx_errors"] = port.get("rx_errors", 0)
+            result["tx_errors"] = port.get("tx_errors", 0)
+        if runtime:
+            for key, value in runtime.items():
+                if key not in result:
+                    result[key] = value
+        return result
+
+    def _enrich_wan_ports(
+        self, wan_ports: list[dict], configs: dict, runtime_ips: dict
+    ) -> list[dict]:
+        enriched = []
+        for port in wan_ports:
+            port_id = port.get("port_id", "")
+            config = self._match_wan_config(
+                port_id, port.get("port_desc", "").strip(), configs
+            )
+            enriched.append(
+                self._enriched_wan_port(
+                    port, port_id, config, runtime_ips.get(port_id, {})
+                )
+            )
+        enriched.sort(key=lambda port: port.get("name", ""))
+        return enriched
+
+    @staticmethod
+    def _index_gateway_ports(
+        ports: list[dict], gateway_macs: set
+    ) -> tuple[dict[str, list[dict]], dict[str, dict[str, dict]]]:
+        wan: dict[str, list[dict]] = {}
+        physical: dict[str, dict[str, dict]] = {}
+        for port in ports:
+            mac = cast(str, port.get("mac"))
+            if mac not in gateway_macs:
+                continue
+            physical.setdefault(mac, {})[port.get("port_id", "")] = port
+            if port.get("port_usage") == "wan":
+                wan.setdefault(mac, []).append(port)
+        return wan, physical
+
+    def _fetch_runtime_ips(
+        self,
+        site_id: str,
+        gateway_id: str | None,
+        mac: str | None,
+        runtime_ips: dict,
+        *,
+        cache_endpoint: str,
+    ) -> None:
+        response = mistapi.api.v1.sites.devices.searchSiteDevices(
+            self.apisession, site_id, type="gateway", mac=mac, stats=True
+        )
+        time.sleep(self.API_DELAY_SECONDS)
+        if response.status_code == 200:
+            results = response.data.get("results", [])
+            if self._redis_cache and results:
+                self._redis_cache.set_raw_api_response(
+                    cache_endpoint,
+                    f"{gateway_id}-{mac}",
+                    response.data,
+                    ttl=self.TEMPLATE_CACHE_TTL,
+                )
+            if results and "if_stat" in results[0]:
+                self._extract_runtime_ips(results[0]["if_stat"], runtime_ips)
+
+    def _configured_wan_port(
+        self, name: str, config: dict, runtime: dict, stats: dict, overridden: bool
+    ) -> dict:
+        ip, netmask = self._port_ip_address(config, runtime)
+        template_type = config.get("template_type", "dhcp")
+        runtime_type = self._runtime_port_type(config, runtime)
+        return {
+            "name": name,
+            "wan_name": config.get("name", ""),
+            "description": config.get("description", ""),
+            "enabled": not config.get("disabled", False),
+            "usage": "wan",
+            "ip": ip,
+            "netmask": netmask,
+            "gateway": config.get("gateway", ""),
+            "type": runtime_type,
+            "template_type": template_type,
+            "vlan_id": config.get("vlan_id", ""),
+            "override": "yes" if runtime_type != template_type or overridden else "no",
+            "up": stats.get("up", False),
+            "rx_bytes": stats.get("rx_bytes", 0),
+            "tx_bytes": stats.get("tx_bytes", 0),
+            "rx_pkts": stats.get("rx_pkts", 0),
+            "tx_pkts": stats.get("tx_pkts", 0),
+            "rx_errors": stats.get("rx_errors", 0),
+            "tx_errors": stats.get("tx_errors", 0),
+            "speed": stats.get("speed", 0),
+            "mac": stats.get("port_mac", ""),
+        }
+
+    def _append_configured_ports(
+        self,
+        ports: list[dict],
+        configs: dict,
+        runtime_ips: dict,
+        physical_stats: dict,
+        overridden: set,
+    ) -> None:
+        names_with_stats = set()
+        for port in ports:
+            name = port.get("name", "")
+            names_with_stats.add(name)
+            if "." in name:
+                names_with_stats.add(name.split(".")[0])
+        for name, config in configs.items():
+            if "{{" in name or "}}" in name:
+                continue
+            base = name.split(".")[0] if "." in name else name
+            if name in names_with_stats or base in names_with_stats:
+                continue
+            ports.append(
+                self._configured_wan_port(
+                    base,
+                    config,
+                    runtime_ips.get(base, {}),
+                    physical_stats.get(base, {}),
+                    name in overridden or base in overridden,
+                )
+            )
+
+    def _gateway_configuration(
+        self,
+        site_id: str | None,
+        gateway_id: str | None,
+        profile_id: str | None,
+        sites: dict,
+    ) -> tuple[dict, str | None]:
+        config = {}
+        template_id = None
+        if site_id and gateway_id:
+            config = self._get_device_config(site_id, gateway_id)
+            if not profile_id:
+                template_id = config.get("gatewaytemplate_id")
+                if not template_id and site_id in sites:
+                    template_id = sites[site_id].get("gatewaytemplate_id")
+        return config, template_id
+
+    def _get_gateway_port_indexes(
+        self, gateway_macs: set
+    ) -> tuple[dict[str, list[dict]], dict[str, dict[str, dict]]]:
+        response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
+            self.apisession, self.org_id, limit=1000, type="gateway"
+        )
+        time.sleep(self.API_DELAY_SECONDS)
+        if response.status_code == 200:
+            return self._index_gateway_ports(
+                mistapi.get_all(self.apisession, response), gateway_macs
+            )
+        return {}, {}
+
+    def _append_gateway_stat_ports(
+        self,
+        ports: list[dict],
+        wan_ports: list[dict],
+        configs: dict,
+        runtime_ips: dict,
+        overridden: set,
+    ) -> None:
+        for port in wan_ports:
+            port_id = port.get("port_id") or ""
+            port_desc = port.get("port_desc", "").strip()
+            config = self._match_wan_config(port_id, port_desc, configs)
+            if not config:
+                config = {
+                    "name": "",
+                    "description": port_desc,
+                    "ip": "",
+                    "netmask": "",
+                    "gateway": "",
+                    "template_type": "dhcp",
+                    "vlan_id": "",
+                    "disabled": False,
+                }
+            ports.append(
+                self._enriched_wan_port(
+                    port,
+                    port_id,
+                    config,
+                    runtime_ips.get(port_id, {}),
+                    device_override=port_id in overridden,
+                    include_errors=True,
+                )
+            )
+
+    def _fetch_gateway_stats_inputs(self) -> tuple[list[dict], dict, dict]:
+        if not self.org_id:
+            raise ValueError("Organization ID is required")
+        sites = self.get_sites()
+        site_names = {site["id"]: site["name"] for site in sites}
+        site_data = {site["id"]: site for site in sites}
+        response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
+            self.apisession, self.org_id, type="gateway", limit=1000
+        )
+        time.sleep(self.API_DELAY_SECONDS)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"API error getting device stats: {response.status_code}"
+            )
+        return mistapi.get_all(self.apisession, response), site_names, site_data
+
     def get_gateway_stats(
         self,
         site_id: str | None = None,
@@ -907,72 +1253,13 @@ class MistConnection:
             List of gateways with their WAN port statistics and configuration
         """
         try:
-            if not self.org_id:
-                raise ValueError("Organization ID is required")
-
-            # Get site data mapping (cached) - includes gatewaytemplate_id for Branch devices
-            sites = self.get_sites()
-            site_map = {s["id"]: s["name"] for s in sites}
-            site_data_map = {
-                s["id"]: s for s in sites
-            }  # Full site data including gatewaytemplate_id
-
-            # Get gateway device stats for basic info (with pagination)
-            device_response = mistapi.api.v1.orgs.stats.listOrgDevicesStats(
-                self.apisession, self.org_id, type="gateway", limit=1000
-            )
-            time.sleep(self.API_DELAY_SECONDS)
-
-            if device_response.status_code != 200:
-                raise RuntimeError(
-                    f"API error getting device stats: {device_response.status_code}"
-                )
-
-            # Use get_all to handle pagination automatically
-            gateways = mistapi.get_all(self.apisession, device_response)
-
-            # Get ALL port statistics using org-level endpoint
-            # This returns physical port status for all gateways
-            wan_ports_by_device: dict[str, list[dict]] = {}
-            all_ports_by_device: dict[str, dict[str, dict]] = (
-                {}
-            )  # Track all ports for physical status
+            gateways, site_map, site_data_map = self._fetch_gateway_stats_inputs()
 
             # Build a set of gateway MACs for filtering port results
             gateway_macs = {gw.get("mac") for gw in gateways if gw.get("mac")}
-
-            # Use type=gateway to only fetch gateway ports (not switches)
-            # Use default 1d time range for faster initial load
-            port_params = {"limit": 1000, "type": "gateway"}
-
-            port_response = mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts(
-                self.apisession,
-                self.org_id,  # type: ignore[arg-type]
-                **port_params,  # type: ignore[arg-type]
+            wan_ports_by_device, all_ports_by_device = self._get_gateway_port_indexes(
+                gateway_macs
             )
-            time.sleep(self.API_DELAY_SECONDS)
-
-            if port_response.status_code == 200:
-                # Use get_all to handle pagination automatically
-                all_ports = mistapi.get_all(self.apisession, port_response)
-                for port in all_ports:
-                    device_mac = port.get("mac")
-                    port_id = port.get("port_id", "")
-
-                    # Only process ports belonging to gateways we care about
-                    if device_mac not in gateway_macs:
-                        continue
-
-                    # Store all ports for physical status lookup
-                    if device_mac not in all_ports_by_device:
-                        all_ports_by_device[device_mac] = {}
-                    all_ports_by_device[device_mac][port_id] = port
-
-                    # Also track WAN ports separately
-                    if port.get("port_usage") == "wan":
-                        if device_mac not in wan_ports_by_device:
-                            wan_ports_by_device[device_mac] = []
-                        wan_ports_by_device[device_mac].append(port)
 
             # Batch fetch inventory data for profile IDs (1 API call)
             inventory_map = self._batch_fetch_inventory(gateway_macs)
@@ -995,17 +1282,17 @@ class MistConnection:
                     logger.warning("Site %s not found in cached site map", gw_site_id)
 
                 # Get WAN ports for this gateway
-                wan_ports = wan_ports_by_device.get(gw_mac, [])
+                wan_ports = wan_ports_by_device.get(cast(str, gw_mac), [])
 
                 # Get all port physical status for this gateway (from org-level port stats)
-                device_port_stats = all_ports_by_device.get(gw_mac, {})
+                device_port_stats = all_ports_by_device.get(cast(str, gw_mac), {})
 
                 # Get device configuration
-                port_configs = []
-                wan_port_config_by_name = (
+                port_configs: list[dict] = []
+                wan_port_config_by_name: dict = (
                     {}
                 )  # Map by port name (e.g., 'ge-0/0/1.30') for matching
-                runtime_ips_by_port = (
+                runtime_ips_by_port: dict = (
                     {}
                 )  # Map of port_id -> actual runtime IP/netmask from if_stat
 
@@ -1016,379 +1303,58 @@ class MistConnection:
                 try:
                     # Get device configuration for port_config and gatewaytemplate_id
                     # Uses Redis cache (persistent) to avoid per-device API calls
-                    device_config = {}
-                    gatewaytemplate_id = None
-                    if gw_site_id and gw_id:
-                        device_config = self._get_device_config(gw_site_id, gw_id)
-                        # Use device config's gatewaytemplate_id if not a Hub device
-                        if not deviceprofile_id:
-                            gatewaytemplate_id = device_config.get("gatewaytemplate_id")
-                            # For Branch devices, gatewaytemplate_id is on the site object (not device config)
-                            if not gatewaytemplate_id and gw_site_id in site_data_map:
-                                gatewaytemplate_id = site_data_map[gw_site_id].get(
-                                    "gatewaytemplate_id"
-                                )
+                    device_config, gatewaytemplate_id = self._gateway_configuration(
+                        gw_site_id, gw_id, deviceprofile_id, site_data_map
+                    )
 
-                    # Start with device profile OR gateway template port_config
-                    # Hub devices use deviceprofile_id, Branch/Spoke devices use gatewaytemplate_id
-                    merged_port_config = {}
-                    if deviceprofile_id:
-                        # Hub device - get config from device profile (class-level cache)
-                        profile_data = self._get_device_profile(deviceprofile_id)
-                        if profile_data and "port_config" in profile_data:
-                            # IMPORTANT: Use deepcopy to avoid mutating the cached template data
-                            # when device-level overrides are merged below
-                            merged_port_config = copy.deepcopy(
-                                profile_data.get("port_config", {})
-                            )
-                            logger.debug(
-                                f"Gateway {gw_id} (Hub) using device profile {deviceprofile_id} with {len(merged_port_config)} ports"
-                            )
-                    elif gatewaytemplate_id:
-                        # Branch/Spoke device - get config from gateway template (class-level cache)
-                        template_data = self._get_gateway_template(gatewaytemplate_id)
-                        if template_data and "port_config" in template_data:
-                            # IMPORTANT: Use deepcopy to avoid mutating the cached template data
-                            # when device-level overrides are merged below
-                            merged_port_config = copy.deepcopy(
-                                template_data.get("port_config", {})
-                            )
-                            logger.debug(
-                                f"Gateway {gw_id} (Branch) using gateway template {gatewaytemplate_id} with {len(merged_port_config)} ports"
-                            )
-
-                    # Merge device-level port_config (overrides profile settings)
-                    # Track which ports have device-level overrides
+                    merged_port_config = self._template_port_config(
+                        deviceprofile_id,
+                        gatewaytemplate_id,
+                        log_source=True,
+                        gateway_id=gw_id,
+                    )
                     device_port_config = device_config.get("port_config", {})
-                    device_override_ports = (
-                        set()
-                    )  # Ports that exist at device level = override
-                    if device_port_config:
-                        for port_name, port_cfg in device_port_config.items():
-                            device_override_ports.add(
-                                port_name
-                            )  # This port has device-level config
-                            if port_name in merged_port_config:
-                                # Merge: device config overrides profile
-                                merged_port_config[port_name].update(port_cfg)
-                            else:
-                                merged_port_config[port_name] = port_cfg
-
-                    # Extract WAN port configurations keyed by port name
-                    for port_name, port_cfg in merged_port_config.items():
-                        if port_cfg.get("usage") == "wan":
-                            ip_cfg = port_cfg.get("ip_config", {})
-                            description = port_cfg.get("description", "").strip()
-                            vlan_id = port_cfg.get("vlan_id", "")
-
-                            # Get template type from ip_config (this is what the template says)
-                            template_ip_type = ip_cfg.get("type", "dhcp")
-
-                            wan_port_config_by_name[port_name] = {
-                                "name": port_cfg.get("name", ""),
-                                "description": description,
-                                "ip": ip_cfg.get("ip", ""),
-                                "netmask": ip_cfg.get("netmask", ""),
-                                "gateway": ip_cfg.get("gateway", ""),
-                                "template_type": template_ip_type,  # Store as template_type for clarity
-                                "vlan_id": str(vlan_id) if vlan_id else "",
-                                "disabled": port_cfg.get("disabled", False),
-                            }
+                    device_override_ports: set = set()
+                    self._merge_device_ports(
+                        merged_port_config,
+                        device_port_config,
+                        device_override_ports,
+                    )
+                    self._extract_wan_configs(
+                        merged_port_config, wan_port_config_by_name
+                    )
 
                     # Get runtime IPs from searchSiteDevices (needed for DHCP IP addresses)
                     # SDK handles 429 rate limiting automatically with token rotation
                     if gw_site_id:
-                        device_search_response = (
-                            mistapi.api.v1.sites.devices.searchSiteDevices(
-                                self.apisession,
-                                gw_site_id,
-                                type="gateway",
-                                mac=gw_mac,
-                                stats=True,
-                            )
+                        self._fetch_runtime_ips(
+                            gw_site_id,
+                            gw_id,
+                            gw_mac,
+                            runtime_ips_by_port,
+                            cache_endpoint="searchSiteDevices",
                         )
-                        time.sleep(self.API_DELAY_SECONDS)
-
-                        if device_search_response.status_code == 200:
-                            search_results = device_search_response.data.get(
-                                "results", []
-                            )
-
-                            # Store raw API response for debugging
-                            if self._redis_cache and search_results:
-                                self._redis_cache.set_raw_api_response(
-                                    "searchSiteDevices",
-                                    f"{gw_id}-{gw_mac}",
-                                    device_search_response.data,
-                                    ttl=self.TEMPLATE_CACHE_TTL,
-                                )
-
-                            if search_results and "if_stat" in search_results[0]:
-                                if_stat = search_results[0]["if_stat"]
-
-                                for if_data in if_stat.values():
-                                    if if_data.get("port_usage") == "wan":
-                                        port_id = if_data.get("port_id", "")
-                                        ips = if_data.get("ips", [])
-
-                                        # Store FULL if_data for this port (all fields from API)
-                                        runtime_entry = dict(if_data)  # Copy all fields
-
-                                        # Also parse IP/CIDR for convenience
-                                        if ips and len(ips) > 0 and "/" in ips[0]:
-                                            ip_cidr = ips[0]
-                                            ip, cidr = ip_cidr.split("/")
-
-                                            # Convert CIDR to netmask
-                                            cidr_int = int(cidr)
-                                            mask = (0xFFFFFFFF >> (32 - cidr_int)) << (
-                                                32 - cidr_int
-                                            )
-                                            netmask = f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
-
-                                            runtime_entry["ip"] = ip
-                                            runtime_entry["netmask"] = netmask
-                                        else:
-                                            runtime_entry["ip"] = ""
-                                            runtime_entry["netmask"] = ""
-
-                                        # Always store runtime data for WAN ports
-                                        runtime_ips_by_port[port_id] = runtime_entry
                 except Exception as e:
                     logger.warning(
                         f"Could not process config for gateway {gw_id}: {e!s}"
                     )
 
-                # Combine WAN port stats with IP configuration
-                for port in wan_ports:
-                    port_id = (
-                        port.get("port_id") or ""
-                    )  # e.g., 'ge-0/0/1' or 'ge-0/0/1.30'
-                    port_desc = port.get("port_desc", "").strip()
-
-                    # Match by port_id (exact match first)
-                    port_config = wan_port_config_by_name.get(port_id, {})
-
-                    # If no exact match, try to find VLAN-tagged config for base interface
-                    # e.g., port_id='ge-0/0/3' should match config key 'ge-0/0/3.301'
-                    if not port_config:
-                        for cfg_name, cfg in wan_port_config_by_name.items():
-                            # Check if config key starts with port_id and has VLAN suffix
-                            if cfg_name.startswith(port_id + "."):
-                                port_config = cfg
-                                break
-
-                    # If still no match, try by description (fallback)
-                    if not port_config and port_desc:
-                        for cfg_name, cfg in wan_port_config_by_name.items():
-                            if cfg.get("description") == port_desc:
-                                port_config = cfg
-                                break
-
-                    # If still no match, use defaults
-                    if not port_config:
-                        port_config = {
-                            "name": "",
-                            "description": port_desc,
-                            "ip": "",
-                            "netmask": "",
-                            "gateway": "",
-                            "template_type": "dhcp",  # Default to DHCP for unconfigured ports
-                            "vlan_id": "",
-                            "disabled": False,
-                        }
-
-                    # Get runtime data
-                    runtime_ip_data = runtime_ips_by_port.get(port_id, {})
-
-                    # Get template type (what the template says this port should be)
-                    template_type = port_config.get("template_type", "dhcp")
-
-                    # Get runtime type from API address_mode
-                    # API returns: 'Dynamic' or 'Static' (capitalized)
-                    # We normalize to: 'dhcp' or 'static' (lowercase)
-                    raw_address_mode = (
-                        runtime_ip_data.get("address_mode", "")
-                        if runtime_ip_data
-                        else ""
-                    )
-                    address_mode_map = {"dynamic": "dhcp", "static": "static"}
-                    runtime_type = address_mode_map.get(
-                        raw_address_mode.lower(), template_type
+                if wan_ports:
+                    self._append_gateway_stat_ports(
+                        port_configs,
+                        wan_ports,
+                        wan_port_config_by_name,
+                        runtime_ips_by_port,
+                        device_override_ports,
                     )
 
-                    # OVERRIDE DETECTION:
-                    # 1. If runtime type != template type, it's an override (e.g., template=DHCP but device=Static)
-                    # 2. If port has device-level config, it's an override (site-level IP/gateway override)
-                    type_override = runtime_type != template_type
-                    device_config_override = port_id in device_override_ports
-                    is_overridden = type_override or device_config_override
-
-                    # Get IP address (from runtime for DHCP, from config for static)
-                    if runtime_ip_data and runtime_ip_data.get("ip"):
-                        ip_addr = runtime_ip_data.get("ip", "")
-                        netmask_str = runtime_ip_data.get("netmask", "")
-                        # Convert dotted-decimal netmask to CIDR
-                        if netmask_str and "." in netmask_str:
-                            parts = netmask_str.split(".")
-                            binary = "".join([bin(int(x) + 256)[3:] for x in parts])
-                            netmask = str(binary.count("1"))
-                        else:
-                            netmask = netmask_str
-                    else:
-                        # Fallback to configured IP (template or device)
-                        ip_addr = port_config.get("ip", "").strip()
-                        netmask = port_config.get("netmask", "").strip()
-
-                        # Remove leading slash from netmask if present (CIDR notation)
-                        netmask = netmask.removeprefix("/")
-
-                    # Use cumulative stats from org-level port search (no per-port API calls)
-                    # The searchOrgSwOrGwPorts endpoint provides traffic data for the time range
-                    rx_bytes = port.get("rx_bytes", 0)
-                    tx_bytes = port.get("tx_bytes", 0)
-
-                    # Build port object
-                    port_obj = {
-                        "name": port_id,
-                        "port_id": port_id,
-                        "wan_name": port_config.get("name", ""),
-                        "description": port_config.get(
-                            "description", port.get("port_desc", "")
-                        ),
-                        "enabled": not port_config.get(
-                            "disabled", False
-                        ),  # Admin status from config
-                        "usage": "wan",
-                        "ip": ip_addr,
-                        "netmask": netmask,
-                        "gateway": port_config.get("gateway", ""),
-                        "type": runtime_type,  # What it's actually running as
-                        "template_type": template_type,  # What the template says
-                        "vlan_id": port_config.get("vlan_id", ""),
-                        "override": "yes" if is_overridden else "no",
-                        "up": port.get("up", False),
-                        "rx_bytes": rx_bytes,
-                        "tx_bytes": tx_bytes,
-                        "rx_pkts": port.get("rx_pkts", 0),
-                        "tx_pkts": port.get("tx_pkts", 0),
-                        "rx_errors": port.get("rx_errors", 0),
-                        "tx_errors": port.get("tx_errors", 0),
-                        "speed": port.get("speed", 0),
-                        "mac": port.get("port_mac", ""),
-                    }
-
-                    # Merge ALL runtime data from searchSiteDevices if_stat (full API response)
-                    if runtime_ip_data:
-                        for key, value in runtime_ip_data.items():
-                            if (
-                                key not in port_obj
-                            ):  # Don't overwrite our computed fields
-                                port_obj[key] = value
-
-                    port_configs.append(port_obj)
-
-                # Add WAN ports from config that don't have stats yet
-                # These are configured WAN ports that may be down or not reporting stats
-                ports_with_stats = set()
-                for pc in port_configs:
-                    ports_with_stats.add(pc.get("name", ""))
-                    # Also track base interface for VLAN-tagged ports
-                    port_name = pc.get("name", "")
-                    if "." in port_name:
-                        base_port = port_name.split(".")[0]
-                        ports_with_stats.add(base_port)
-
-                for cfg_port_name, cfg in wan_port_config_by_name.items():
-                    # Skip Jinja template variables (unresolved template placeholders)
-                    if "{{" in cfg_port_name or "}}" in cfg_port_name:
-                        continue
-
-                    # Extract base port name (e.g., 'ge-0/0/1' from 'ge-0/0/1.30')
-                    base_port_name = (
-                        cfg_port_name.split(".")[0]
-                        if "." in cfg_port_name
-                        else cfg_port_name
-                    )
-
-                    # Skip if we already have stats for this port
-                    if (
-                        cfg_port_name in ports_with_stats
-                        or base_port_name in ports_with_stats
-                    ):
-                        continue
-
-                    # Get template type and runtime data
-                    template_type = cfg.get("template_type", "dhcp")
-                    runtime_ip_data = runtime_ips_by_port.get(base_port_name, {})
-
-                    # Get runtime type from address_mode
-                    raw_address_mode = (
-                        runtime_ip_data.get("address_mode", "")
-                        if runtime_ip_data
-                        else ""
-                    )
-                    address_mode_map = {"dynamic": "dhcp", "static": "static"}
-                    runtime_type = address_mode_map.get(
-                        raw_address_mode.lower(), template_type
-                    )
-
-                    # OVERRIDE DETECTION:
-                    # 1. If runtime type != template type, it's an override
-                    # 2. If port has device-level config, it's an override
-                    type_override = runtime_type != template_type
-                    device_config_override = (
-                        cfg_port_name in device_override_ports
-                        or base_port_name in device_override_ports
-                    )
-                    is_overridden = type_override or device_config_override
-
-                    # Get IP address
-                    if runtime_ip_data and runtime_ip_data.get("ip"):
-                        ip_addr = runtime_ip_data.get("ip", "")
-                        netmask_str = runtime_ip_data.get("netmask", "")
-                        if netmask_str and "." in netmask_str:
-                            parts = netmask_str.split(".")
-                            binary = "".join([bin(int(x) + 256)[3:] for x in parts])
-                            netmask = str(binary.count("1"))
-                        else:
-                            netmask = netmask_str
-                    else:
-                        ip_addr = cfg.get("ip", "").strip()
-                        netmask = cfg.get("netmask", "").strip()
-                        netmask = netmask.removeprefix("/")
-
-                    # Get physical port status from org-level port stats
-                    port_stats = device_port_stats.get(base_port_name, {})
-                    physical_up = port_stats.get("up", False)
-                    port_speed = port_stats.get("speed", 0)
-
-                    port_configs.append(
-                        {
-                            "name": base_port_name,
-                            "wan_name": cfg.get("name", ""),
-                            "description": cfg.get("description", ""),
-                            "enabled": not cfg.get(
-                                "disabled", False
-                            ),  # Admin status from config
-                            "usage": "wan",
-                            "ip": ip_addr,
-                            "netmask": netmask,
-                            "gateway": cfg.get("gateway", ""),
-                            "type": runtime_type,
-                            "template_type": template_type,
-                            "vlan_id": cfg.get("vlan_id", ""),
-                            "override": "yes" if is_overridden else "no",
-                            "up": physical_up,
-                            "rx_bytes": port_stats.get("rx_bytes", 0),
-                            "tx_bytes": port_stats.get("tx_bytes", 0),
-                            "rx_pkts": port_stats.get("rx_pkts", 0),
-                            "tx_pkts": port_stats.get("tx_pkts", 0),
-                            "rx_errors": port_stats.get("rx_errors", 0),
-                            "tx_errors": port_stats.get("tx_errors", 0),
-                            "speed": port_speed,
-                            "mac": port_stats.get("port_mac", ""),
-                        }
+                if wan_port_config_by_name:
+                    self._append_configured_ports(
+                        port_configs,
+                        wan_port_config_by_name,
+                        runtime_ips_by_port,
+                        device_port_stats,
+                        device_override_ports,
                     )
 
                 # Sort ports by name for consistent display
@@ -1543,6 +1509,45 @@ class MistConnection:
             )
             return {"success": False, "peers_by_port": {}, "total_peers": 0}
 
+    def _active_api_token(self) -> str:
+        current_token = self.api_token.split(",")[0].strip()
+        try:
+            tokens = getattr(self.apisession, "_apitoken", None)
+            token_idx = getattr(self.apisession, "_apitoken_index", 0)
+            if tokens and len(tokens) > token_idx >= 0:
+                current_token = tokens[token_idx]
+        except Exception as e:
+            logger.debug("Could not read active Mist API token: %s", e)
+        return current_token
+
+    @staticmethod
+    def _unix_insight_timestamps(timestamps: list) -> list:
+        from datetime import datetime
+
+        result = []
+        for timestamp in timestamps:
+            if isinstance(timestamp, str):
+                try:
+                    result.append(int(datetime.fromisoformat(timestamp).timestamp()))
+                except Exception:
+                    result.append(0)
+            else:
+                result.append(timestamp)
+        return result
+
+    def _normalize_port_insights(self, data: dict, interval: int) -> dict:
+        rx_bps = [value if value is not None else 0 for value in data.get("rx_bps", [])]
+        tx_bps = [value if value is not None else 0 for value in data.get("tx_bps", [])]
+        response_interval = data.get("interval", interval)
+        return {
+            "timestamps": self._unix_insight_timestamps(data.get("rt", [])),
+            "rx_bps": rx_bps,
+            "tx_bps": tx_bps,
+            "rx_bytes": sum(bps * response_interval for bps in rx_bps if bps) // 8,
+            "tx_bytes": sum(bps * response_interval for bps in tx_bps if bps) // 8,
+            "interval": response_interval,
+        }
+
     def _get_port_insights(
         self,
         site_id: str,
@@ -1572,18 +1577,8 @@ class MistConnection:
         import requests
 
         try:
-            # Get current token from the session
-            current_token = self.api_token.split(",")[0].strip()
-            try:
-                tokens = getattr(self.apisession, "_apitoken", None)
-                token_idx = getattr(self.apisession, "_apitoken_index", 0)
-                if tokens and len(tokens) > token_idx >= 0:
-                    current_token = tokens[token_idx]
-            except Exception as e:
-                logger.debug("Could not read active Mist API token: %s", e)
-
             headers = {
-                "Authorization": f"Token {current_token}",
+                "Authorization": f"Token {self._active_api_token()}",
                 "Content-Type": "application/json",
             }
 
@@ -1601,50 +1596,7 @@ class MistConnection:
             time.sleep(self.API_DELAY_SECONDS)
 
             if response.status_code == 200:
-                data = response.json()
-
-                # API returns rx_bps and tx_bps arrays directly (values can be null)
-                rx_bps_list = data.get("rx_bps", [])
-                tx_bps_list = data.get("tx_bps", [])
-                timestamps = data.get("rt", [])
-                response_interval = data.get("interval", interval)
-
-                # Convert null values to 0
-                rx_bps_list = [v if v is not None else 0 for v in rx_bps_list]
-                tx_bps_list = [v if v is not None else 0 for v in tx_bps_list]
-
-                # Convert ISO timestamps to Unix timestamps if needed
-                unix_timestamps = []
-                for ts in timestamps:
-                    if isinstance(ts, str):
-                        # Parse ISO format: "2025-12-21T18:20:00Z"
-                        from datetime import datetime
-
-                        try:
-                            dt = datetime.fromisoformat(ts)
-                            unix_timestamps.append(int(dt.timestamp()))
-                        except Exception:
-                            unix_timestamps.append(0)
-                    else:
-                        unix_timestamps.append(ts)
-
-                # Calculate total bytes transferred from bps values
-                # bytes = bps * interval_seconds / 8
-                rx_bytes = (
-                    sum(bps * response_interval for bps in rx_bps_list if bps) // 8
-                )
-                tx_bytes = (
-                    sum(bps * response_interval for bps in tx_bps_list if bps) // 8
-                )
-
-                return {
-                    "timestamps": unix_timestamps,
-                    "rx_bps": rx_bps_list,
-                    "tx_bps": tx_bps_list,
-                    "rx_bytes": rx_bytes,
-                    "tx_bytes": tx_bytes,
-                    "interval": response_interval,
-                }
+                return self._normalize_port_insights(response.json(), interval)
             elif response.status_code == 429:
                 self._report_rate_limit(tokens_exhausted=self._token_count)
                 logger.warning(
@@ -1915,9 +1867,8 @@ class MistConnection:
         if not gw_id or not gw_site_id:
             return self._minimal_port_enrichment(wan_ports)
 
-        port_configs = []
-        wan_port_config_by_name = {}
-        runtime_ips_by_port = {}
+        wan_port_config_by_name: dict = {}
+        runtime_ips_by_port: dict = {}
 
         try:
             # Get profile ID from inventory map
@@ -1938,170 +1889,30 @@ class MistConnection:
                     if site_info:
                         gatewaytemplate_id = site_info.get("gatewaytemplate_id")
 
-            # Get template/profile from BULK cache (no API call)
-            merged_port_config = {}
-            if deviceprofile_id:
-                profile_data = self._get_device_profile_cached(deviceprofile_id)
-                if profile_data and "port_config" in profile_data:
-                    merged_port_config = copy.deepcopy(
-                        profile_data.get("port_config", {})
-                    )
-            elif gatewaytemplate_id:
-                template_data = self._get_gateway_template_cached(gatewaytemplate_id)
-                if template_data and "port_config" in template_data:
-                    merged_port_config = copy.deepcopy(
-                        template_data.get("port_config", {})
-                    )
-
-            # Merge device-level port_config overrides
-            device_port_config = device_config.get("port_config", {})
-            overridden_ports = set()
-            if device_port_config:
-                for port_name, port_cfg in device_port_config.items():
-                    overridden_ports.add(port_name)
-                    if port_name in merged_port_config:
-                        merged_port_config[port_name].update(port_cfg)
-                    else:
-                        merged_port_config[port_name] = port_cfg
-
-            # Extract WAN port configurations
-            for port_name, port_cfg in merged_port_config.items():
-                if port_cfg.get("usage") == "wan":
-                    ip_cfg = port_cfg.get("ip_config", {})
-                    template_ip_type = ip_cfg.get("type", "dhcp")
-
-                    wan_port_config_by_name[port_name] = {
-                        "name": port_cfg.get("name", ""),
-                        "description": port_cfg.get("description", "").strip(),
-                        "ip": ip_cfg.get("ip", ""),
-                        "netmask": ip_cfg.get("netmask", ""),
-                        "gateway": ip_cfg.get("gateway", ""),
-                        "template_type": template_ip_type,
-                        "vlan_id": (
-                            str(port_cfg.get("vlan_id", ""))
-                            if port_cfg.get("vlan_id")
-                            else ""
-                        ),
-                        "disabled": port_cfg.get("disabled", False),
-                    }
+            merged_port_config = self._template_port_config(
+                deviceprofile_id, gatewaytemplate_id, cached=True
+            )
+            self._merge_device_ports(
+                merged_port_config, device_config.get("port_config", {})
+            )
+            self._extract_wan_configs(merged_port_config, wan_port_config_by_name)
 
             # Get runtime IPs from BULK data (no API call)
             runtime_device = self._get_runtime_stats_from_bulk(
                 gw_mac or "", site_data.get("runtime", {})
             )
             if runtime_device and "if_stat" in runtime_device:
-                if_stat = runtime_device["if_stat"]
-
-                for if_data in if_stat.values():
-                    if if_data.get("port_usage") == "wan":
-                        port_id = if_data.get("port_id", "")
-                        ips = if_data.get("ips", [])
-
-                        runtime_entry = dict(if_data)
-
-                        if ips and len(ips) > 0 and "/" in ips[0]:
-                            ip_cidr = ips[0]
-                            ip, cidr = ip_cidr.split("/")
-                            cidr_int = int(cidr)
-                            mask = (0xFFFFFFFF >> (32 - cidr_int)) << (32 - cidr_int)
-                            netmask = f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
-
-                            runtime_entry["ip"] = ip
-                            runtime_entry["netmask"] = netmask
-                        else:
-                            runtime_entry["ip"] = ""
-                            runtime_entry["netmask"] = ""
-
-                        runtime_ips_by_port[port_id] = runtime_entry
+                self._extract_runtime_ips(
+                    runtime_device["if_stat"], runtime_ips_by_port
+                )
 
         except Exception as e:
             logger.warning(f"Could not get config for gateway {gw_id}: {e!s}")
             return self._minimal_port_enrichment(wan_ports)
 
-        # Build enriched port objects (same logic as original)
-        for port in wan_ports:
-            port_id = port.get("port_id", "")
-            port_desc = port.get("port_desc", "").strip()
-
-            port_config = wan_port_config_by_name.get(port_id, {})
-
-            if not port_config:
-                for cfg_name, cfg in wan_port_config_by_name.items():
-                    if cfg_name.startswith(port_id + "."):
-                        port_config = cfg
-                        break
-
-            if not port_config and port_desc:
-                for cfg_name, cfg in wan_port_config_by_name.items():
-                    if cfg.get("description") == port_desc:
-                        port_config = cfg
-                        break
-
-            runtime_ip_data = runtime_ips_by_port.get(port_id, {})
-            template_type = (
-                port_config.get("template_type", "dhcp") if port_config else "dhcp"
-            )
-
-            raw_address_mode = (
-                runtime_ip_data.get("address_mode", "") if runtime_ip_data else ""
-            )
-            address_mode_map = {"dynamic": "dhcp", "static": "static"}
-            runtime_type = address_mode_map.get(raw_address_mode.lower(), template_type)
-
-            is_overridden = runtime_type != template_type
-
-            if runtime_ip_data and runtime_ip_data.get("ip"):
-                ip_addr = runtime_ip_data.get("ip", "")
-                netmask_str = runtime_ip_data.get("netmask", "")
-                if netmask_str and "." in netmask_str:
-                    parts = netmask_str.split(".")
-                    binary = "".join([bin(int(x) + 256)[3:] for x in parts])
-                    netmask = str(binary.count("1"))
-                else:
-                    netmask = netmask_str
-            else:
-                ip_addr = port_config.get("ip", "").strip() if port_config else ""
-                netmask = port_config.get("netmask", "").strip() if port_config else ""
-                netmask = netmask.removeprefix("/")
-
-            port_obj = {
-                "name": port_id,
-                "port_id": port_id,
-                "wan_name": port_config.get("name", "") if port_config else "",
-                "description": (
-                    port_config.get("description", port_desc)
-                    if port_config
-                    else port_desc
-                ),
-                "enabled": not (
-                    port_config.get("disabled", False) if port_config else False
-                ),
-                "usage": "wan",
-                "ip": ip_addr,
-                "netmask": netmask,
-                "gateway": port_config.get("gateway", "") if port_config else "",
-                "type": runtime_type,
-                "template_type": template_type,
-                "vlan_id": port_config.get("vlan_id", "") if port_config else "",
-                "override": "yes" if is_overridden else "no",
-                "up": port.get("up", False),
-                "rx_bytes": port.get("rx_bytes", 0),
-                "tx_bytes": port.get("tx_bytes", 0),
-                "rx_pkts": port.get("rx_pkts", 0),
-                "tx_pkts": port.get("tx_pkts", 0),
-                "speed": port.get("speed", 0),
-                "mac": port.get("port_mac", ""),
-            }
-
-            if runtime_ip_data:
-                for key, value in runtime_ip_data.items():
-                    if key not in port_obj:
-                        port_obj[key] = value
-
-            port_configs.append(port_obj)
-
-        port_configs.sort(key=lambda p: p.get("name", ""))
-        return port_configs
+        return self._enrich_wan_ports(
+            wan_ports, wan_port_config_by_name, runtime_ips_by_port
+        )
 
     def enrich_gateway_ports(
         self, gateway: dict, wan_ports: list[dict], inventory_map: dict
@@ -2128,9 +1939,8 @@ class MistConnection:
             # Return minimally enriched ports if we can't get full config
             return self._minimal_port_enrichment(wan_ports)
 
-        port_configs = []
-        wan_port_config_by_name = {}
-        runtime_ips_by_port = {}
+        wan_port_config_by_name: dict = {}
+        runtime_ips_by_port: dict = {}
 
         try:
             # Get profile ID from inventory map
@@ -2150,208 +1960,29 @@ class MistConnection:
                     if site_data:
                         gatewaytemplate_id = site_data.get("gatewaytemplate_id")
 
-            # Start with device profile OR gateway template port_config
-            merged_port_config = {}
-            if deviceprofile_id:
-                profile_data = self._get_device_profile(deviceprofile_id)
-                if profile_data and "port_config" in profile_data:
-                    # IMPORTANT: Use deepcopy to avoid mutating the cached template data
-                    # when device-level overrides are merged below
-                    merged_port_config = copy.deepcopy(
-                        profile_data.get("port_config", {})
-                    )
-            elif gatewaytemplate_id:
-                template_data = self._get_gateway_template(gatewaytemplate_id)
-                if template_data and "port_config" in template_data:
-                    # IMPORTANT: Use deepcopy to avoid mutating the cached template data
-                    # when device-level overrides are merged below
-                    merged_port_config = copy.deepcopy(
-                        template_data.get("port_config", {})
-                    )
-
-            # Merge device-level port_config (overrides profile settings)
-            device_port_config = device_config.get("port_config", {})
-            overridden_ports = set()
-            if device_port_config:
-                for port_name, port_cfg in device_port_config.items():
-                    overridden_ports.add(port_name)
-                    if port_name in merged_port_config:
-                        merged_port_config[port_name].update(port_cfg)
-                    else:
-                        merged_port_config[port_name] = port_cfg
-
-            # Extract WAN port configurations keyed by port name
-            for port_name, port_cfg in merged_port_config.items():
-                if port_cfg.get("usage") == "wan":
-                    ip_cfg = port_cfg.get("ip_config", {})
-                    template_ip_type = ip_cfg.get("type", "dhcp")
-
-                    wan_port_config_by_name[port_name] = {
-                        "name": port_cfg.get("name", ""),
-                        "description": port_cfg.get("description", "").strip(),
-                        "ip": ip_cfg.get("ip", ""),
-                        "netmask": ip_cfg.get("netmask", ""),
-                        "gateway": ip_cfg.get("gateway", ""),
-                        "template_type": template_ip_type,
-                        "vlan_id": (
-                            str(port_cfg.get("vlan_id", ""))
-                            if port_cfg.get("vlan_id")
-                            else ""
-                        ),
-                        "disabled": port_cfg.get("disabled", False),
-                    }
-
-            # Get runtime IPs from searchSiteDevices (needed for DHCP IP addresses)
-            device_search_response = mistapi.api.v1.sites.devices.searchSiteDevices(
-                self.apisession, gw_site_id, type="gateway", mac=gw_mac, stats=True
+            merged_port_config = self._template_port_config(
+                deviceprofile_id, gatewaytemplate_id
             )
-            time.sleep(self.API_DELAY_SECONDS)
+            self._merge_device_ports(
+                merged_port_config, device_config.get("port_config", {})
+            )
+            self._extract_wan_configs(merged_port_config, wan_port_config_by_name)
 
-            if device_search_response.status_code == 200:
-                search_results = device_search_response.data.get("results", [])
-
-                # Store raw API response for debugging
-                if self._redis_cache and search_results:
-                    self._redis_cache.set_raw_api_response(
-                        "searchSiteDevices_enrich",
-                        f"{gw_id}-{gw_mac}",
-                        device_search_response.data,
-                        ttl=self.TEMPLATE_CACHE_TTL,
-                    )
-
-                if search_results and "if_stat" in search_results[0]:
-                    if_stat = search_results[0]["if_stat"]
-
-                    for if_data in if_stat.values():
-                        if if_data.get("port_usage") == "wan":
-                            port_id = if_data.get("port_id", "")
-                            ips = if_data.get("ips", [])
-
-                            # Store FULL if_data for this port (all fields from API)
-                            runtime_entry = dict(if_data)  # Copy all fields
-
-                            # Also parse IP/CIDR for convenience
-                            if ips and len(ips) > 0 and "/" in ips[0]:
-                                ip_cidr = ips[0]
-                                ip, cidr = ip_cidr.split("/")
-                                cidr_int = int(cidr)
-                                mask = (0xFFFFFFFF >> (32 - cidr_int)) << (
-                                    32 - cidr_int
-                                )
-                                netmask = f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
-
-                                runtime_entry["ip"] = ip
-                                runtime_entry["netmask"] = netmask
-                            else:
-                                runtime_entry["ip"] = ""
-                                runtime_entry["netmask"] = ""
-
-                            # Always store runtime data for WAN ports
-                            runtime_ips_by_port[port_id] = runtime_entry
+            self._fetch_runtime_ips(
+                gw_site_id,
+                gw_id,
+                gw_mac,
+                runtime_ips_by_port,
+                cache_endpoint="searchSiteDevices_enrich",
+            )
 
         except Exception as e:
             logger.warning(f"Could not get config for gateway {gw_id}: {e!s}")
             return self._minimal_port_enrichment(wan_ports)
 
-        # Combine WAN port stats with IP configuration
-        for port in wan_ports:
-            port_id = port.get("port_id", "")
-            port_desc = port.get("port_desc", "").strip()
-
-            # Match by port_id (exact match first)
-            port_config = wan_port_config_by_name.get(port_id, {})
-
-            # If no exact match, try VLAN-tagged config for base interface
-            if not port_config:
-                for cfg_name, cfg in wan_port_config_by_name.items():
-                    if cfg_name.startswith(port_id + "."):
-                        port_config = cfg
-                        break
-
-            # If still no match, try by description
-            if not port_config and port_desc:
-                for cfg_name, cfg in wan_port_config_by_name.items():
-                    if cfg.get("description") == port_desc:
-                        port_config = cfg
-                        break
-
-            # Get runtime data
-            runtime_ip_data = runtime_ips_by_port.get(port_id, {})
-
-            # Get template type (what the template says this port should be)
-            template_type = (
-                port_config.get("template_type", "dhcp") if port_config else "dhcp"
-            )
-
-            # Get runtime type from API address_mode
-            # API returns: 'Dynamic' or 'Static' (capitalized)
-            # We normalize to: 'dhcp' or 'static' (lowercase)
-            raw_address_mode = (
-                runtime_ip_data.get("address_mode", "") if runtime_ip_data else ""
-            )
-            address_mode_map = {"dynamic": "dhcp", "static": "static"}
-            runtime_type = address_mode_map.get(raw_address_mode.lower(), template_type)
-
-            # SIMPLE OVERRIDE DETECTION:
-            # If runtime type != template type, it's an override
-            is_overridden = runtime_type != template_type
-
-            # Get IP address
-            if runtime_ip_data and runtime_ip_data.get("ip"):
-                ip_addr = runtime_ip_data.get("ip", "")
-                netmask_str = runtime_ip_data.get("netmask", "")
-                if netmask_str and "." in netmask_str:
-                    parts = netmask_str.split(".")
-                    binary = "".join([bin(int(x) + 256)[3:] for x in parts])
-                    netmask = str(binary.count("1"))
-                else:
-                    netmask = netmask_str
-            else:
-                ip_addr = port_config.get("ip", "").strip() if port_config else ""
-                netmask = port_config.get("netmask", "").strip() if port_config else ""
-                netmask = netmask.removeprefix("/")
-
-            # Build port object
-            port_obj = {
-                "name": port_id,
-                "port_id": port_id,
-                "wan_name": port_config.get("name", "") if port_config else "",
-                "description": (
-                    port_config.get("description", port_desc)
-                    if port_config
-                    else port_desc
-                ),
-                "enabled": not (
-                    port_config.get("disabled", False) if port_config else False
-                ),  # Admin status from config
-                "usage": "wan",
-                "ip": ip_addr,
-                "netmask": netmask,
-                "gateway": port_config.get("gateway", "") if port_config else "",
-                "type": runtime_type,  # What it's actually running as
-                "template_type": template_type,  # What the template says
-                "vlan_id": port_config.get("vlan_id", "") if port_config else "",
-                "override": "yes" if is_overridden else "no",
-                "up": port.get("up", False),
-                "rx_bytes": port.get("rx_bytes", 0),
-                "tx_bytes": port.get("tx_bytes", 0),
-                "rx_pkts": port.get("rx_pkts", 0),
-                "tx_pkts": port.get("tx_pkts", 0),
-                "speed": port.get("speed", 0),
-                "mac": port.get("port_mac", ""),
-            }
-
-            # Merge ALL runtime data from searchSiteDevices if_stat (full API response)
-            if runtime_ip_data:
-                for key, value in runtime_ip_data.items():
-                    if key not in port_obj:  # Don't overwrite our computed fields
-                        port_obj[key] = value
-
-            port_configs.append(port_obj)
-
-        # Sort ports by name
-        port_configs.sort(key=lambda p: p.get("name", ""))
-        return port_configs
+        return self._enrich_wan_ports(
+            wan_ports, wan_port_config_by_name, runtime_ips_by_port
+        )
 
     def _minimal_port_enrichment(self, wan_ports: list[dict]) -> list[dict]:
         """
