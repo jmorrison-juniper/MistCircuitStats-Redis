@@ -1,0 +1,33 @@
+name: CodeQL
+
+# A pull request against any base runs the scan, so a required check always
+# reports. The push trigger is scoped to main, so one event starts one run.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# Each job names its own scopes.
+permissions: {}
+
+# A new commit cancels the previous run on a branch, but never on main.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # The shared workflow runs the analysis in its job named analyze. Code
+  # scanning keys the alerts on this file path and that job ID, so do not
+  # rename this file. The check name is "codeql / Analyze (python)".
+  codeql:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-codeql.yml@da02d4c6a2163d1882f2ad25fce80b8ba38304d1 # v0.6.2
+    with:
+      languages: '["python"]'
+      config-file: ./.github/codeql/codeql-config.yml
