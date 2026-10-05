@@ -9,7 +9,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 from redis_cache import RedisCache
 
@@ -36,6 +36,33 @@ def get_cache():
     if cache is None:
         cache = RedisCache()
     return cache
+
+
+GENERIC_ERROR_MESSAGE = (  # The client sees this text, never the exception text.
+    "The server cannot complete the request. Examine the server log."
+)
+
+
+def internal_error_response(
+    action: str,
+    error: Exception,
+    payload: dict[str, object] | None = None,
+    status: int = 500,
+) -> tuple[Response, int]:
+    """Log an exception on the server and return a generic JSON error.
+
+    The exception text can hold a stack trace or internal detail, so it goes to
+    the server log only (CWE-209). The response keeps the status code and the
+    keys that the frontend expects, with a generic message in "error".
+    """
+    logger.error(  # Full context and traceback stay on the server.
+        "Error %s: %s", action, error, exc_info=error
+    )
+    body = dict(
+        payload or {"success": False}
+    )  # Copy, so the caller dict is not changed.
+    body["error"] = GENERIC_ERROR_MESSAGE  # Generic text replaces the exception text.
+    return jsonify(body), status
 
 
 # ==================== Frontend Routes ====================
@@ -68,8 +95,7 @@ def api_status():
             }
         )
     except Exception as e:
-        logger.error("Error getting status: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting status", e)
 
 
 @app.route("/api/organization")
@@ -86,8 +112,7 @@ def api_organization():
                 404,
             )
     except Exception as e:
-        logger.error("Error getting organization: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting organization", e)
 
 
 @app.route("/api/sites")
@@ -101,8 +126,7 @@ def api_sites():
         else:
             return jsonify({"success": False, "error": "No sites data in cache"}), 404
     except Exception as e:
-        logger.error("Error getting sites: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting sites", e)
 
 
 @app.route("/api/cache-stats")
@@ -113,8 +137,7 @@ def api_cache_stats():
         stats = c.get_cache_stats()
         return jsonify({"success": True, "data": stats})
     except Exception as e:
-        logger.error("Error getting cache stats: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting cache stats", e)
 
 
 @app.route("/api/gateways")
@@ -142,8 +165,7 @@ def api_gateways():
                 404,
             )
     except Exception as e:
-        logger.error("Error getting gateways: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting gateways", e)
 
 
 @app.route("/api/vpn-peers/<gateway_id>/<mac>")
@@ -157,8 +179,7 @@ def api_vpn_peers(gateway_id, mac):
         else:
             return jsonify({"success": True, "data": {}})  # Empty is OK
     except Exception as e:
-        logger.error("Error getting VPN peers: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting VPN peers", e)
 
 
 @app.route("/api/vpn-peers/all")
@@ -169,8 +190,7 @@ def api_all_vpn_peers():
         all_peers = c.get_all_vpn_peers()
         return jsonify({"success": True, "data": all_peers})
     except Exception as e:
-        logger.error("Error getting all VPN peers: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting all VPN peers", e)
 
 
 @app.route("/api/insights/<gateway_id>/<path:port_id>")
@@ -188,8 +208,7 @@ def api_insights(gateway_id, port_id):
         else:
             return jsonify({"success": True, "data": {}})  # Empty is OK
     except Exception as e:
-        logger.error("Error getting insights: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting insights", e)
 
 
 @app.route("/api/insights/all")
@@ -200,8 +219,7 @@ def api_all_insights():
         all_insights = c.get_all_insights()
         return jsonify({"success": True, "data": all_insights})
     except Exception as e:
-        logger.error("Error getting all insights: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting all insights", e)
 
 
 @app.route("/api/gateway/<gateway_id>/port/<path:port_id>/traffic")
@@ -284,8 +302,7 @@ def api_port_traffic(gateway_id, port_id):
             }
         )
     except Exception as e:
-        logger.error("Error getting port traffic: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting port traffic", e)
 
 
 @app.route("/api/token-status")
@@ -310,8 +327,7 @@ def api_token_status():
             }
         )
     except Exception as e:
-        logger.error("Error getting token status: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting token status", e)
 
 
 @app.route("/api/templates")
@@ -322,8 +338,7 @@ def api_templates():
         templates = c.get_all_gateway_templates()
         return jsonify({"success": True, "data": templates})
     except Exception as e:
-        logger.error("Error getting templates: %s", e)
-        return jsonify({"success": False, "error": str(e)}), 500
+        return internal_error_response("getting templates", e)
 
 
 @app.route("/health")
@@ -349,7 +364,9 @@ def health_check():
             code,
         )
     except Exception as e:
-        return jsonify({"status": "unhealthy", "error": str(e)}), 503
+        return internal_error_response(
+            "checking health", e, {"status": "unhealthy"}, 503
+        )
 
 
 # ==================== Main ====================

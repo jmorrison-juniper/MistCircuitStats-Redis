@@ -106,19 +106,65 @@ def test_missing_cached_data_returns_not_found(
     assert "error" in response.json
 
 
-def test_cache_errors_are_reported_to_api_clients(
+def test_cache_errors_return_a_generic_message_and_log_the_cause(
     client_and_cache: tuple[FlaskClient, StubCache],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """The client gets no exception text, and the server log keeps it (CWE-209)."""
     client, cache = client_and_cache
     cache.fail_on.add("get_organization")
 
-    response = client.get("/api/organization")
+    with caplog.at_level("ERROR", logger=web.logger.name):
+        response = client.get("/api/organization")
 
     assert response.status_code == 500
+    assert response.json == {"success": False, "error": web.GENERIC_ERROR_MESSAGE}
+    assert "unavailable" not in response.get_data(as_text=True)
+    assert "get_organization unavailable" in caplog.text
+    assert "Traceback" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "failing_method"),
+    (
+        ("/api/sites", "get_sites"),
+        ("/api/gateways", "get_gateways"),
+        ("/api/status", "is_cache_valid"),
+        ("/api/gateway/gw-1/port/wan0/traffic", "get_insights_by_resolution"),
+    ),
+)
+def test_api_errors_keep_status_and_shape_without_exception_text(
+    client_and_cache: tuple[FlaskClient, StubCache],
+    endpoint: str,
+    failing_method: str,
+) -> None:
+    """Each API handler keeps status 500 and the success/error keys."""
+    client, cache = client_and_cache
+    cache.fail_on.add(failing_method)
+
+    response = client.get(endpoint)
+
+    assert response.status_code == 500
+    assert response.json == {"success": False, "error": web.GENERIC_ERROR_MESSAGE}
+
+
+def test_health_check_error_hides_exception_text(
+    client_and_cache: tuple[FlaskClient, StubCache],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The health check keeps status 503 and its shape on an exception."""
+    client, cache = client_and_cache
+    cache.fail_on.add("is_cache_valid")
+
+    with caplog.at_level("ERROR", logger=web.logger.name):
+        response = client.get("/health")
+
+    assert response.status_code == 503
     assert response.json == {
-        "success": False,
-        "error": "get_organization unavailable",
+        "status": "unhealthy",
+        "error": web.GENERIC_ERROR_MESSAGE,
     }
+    assert "is_cache_valid unavailable" in caplog.text
 
 
 @pytest.mark.parametrize(
