@@ -135,6 +135,8 @@ request, an output to a file, a database operation, a data transform, or a quest
 - Each change carries its tests: the unit test, the integration test, and the edge-case test. A
   test must be able to fail.
 - Do not use a production credential in a test. Mock an external response.
+- If a test fails in the full run and passes alone, a different test changes shared state, so
+  repair that test.
 - Remove each debug artifact, such as a temporary print, before you commit.
 
 A guard or a gate must prove that it can fail. Its output gives the number of files, records, or
@@ -161,8 +163,11 @@ repair is large, open an issue and refer to it.
 
 If you start a container for a test or a debug session, obey four rules. Start it in the compose
 group of the project. Give it the name of its issue or its pull request. Publish no port of the
-local stack. Remove the container, its volume, and its network when the test ends. The repository
-file gives the compose group, the name pattern, and the free port range.
+local stack. Remove the container, its volume, and its network by exact name when the test ends.
+The repository file gives the compose group, the name pattern, and the free port range.
+
+Warning: on a shared host, do not run a `system prune` or a `volume prune` command, because it
+removes the data of other users.
 
 ## Secrets
 
@@ -187,7 +192,8 @@ Each repository uses a trunk-based model, and `main` is the released state.
 ### Branch
 
 - Give the branch the name `<type>/<issue>-<slug>`, for example `fix/42-clear-session`. The type is
-  `feat`, `fix`, `chore`, or `docs`.
+  `feat`, `fix`, `chore`, or `docs`, and the commit type can be more precise. The Spec Kit branch
+  name `<number>-<slug>` is also correct.
 - Branch from `main` only, not from a different branch.
 - Use a worktree for each branch, with its own environment. Do not run `git checkout` in a checkout
   that a different session uses.
@@ -197,8 +203,7 @@ Each repository uses a trunk-based model, and `main` is the released state.
 - Push with `--force-with-lease`, not with `--force`.
 - Use a branch in the repository, not a fork. A fork receives a read-only token and no secrets.
 
-Warning: a stacked branch can cause a cascading conflict, so each merge breaks the next branch and
-an engineer repairs the same conflict again.
+Warning: a stacked branch causes a cascading conflict, because each merge breaks the next branch.
 
 ### Commit
 
@@ -227,10 +232,9 @@ a destructive operation, because a human examines that change.
 
 ### Merge
 
-Squash the merge, so one pull request becomes one commit on `main`. Each repository enforces linear
-history and required checks, and no administrator can skip them. Do not push to `main`. Do not
-force-push to `main` or to a branch that a different agent shares. Remove the branch and the
-worktree after the merge.
+Squash the merge, so one pull request becomes one commit on `main`. Do not push to `main`. Do not
+force-push to a branch that a different agent shares. Remove the branch and the worktree after the
+merge.
 
 Warning: a commit pushed after a squash merge closes its pull request becomes an orphan that nobody
 will merge. File a new issue, then branch again from `main`.
@@ -291,8 +295,8 @@ A workflow change is a code change. Each workflow carries these guards:
 
 1. One event starts one run. Scope the `push` event to `main` when the workflow also declares
    `pull_request`.
-2. A new commit cancels the previous run, except on `main`. The concurrency group key is
-   `github.head_ref || github.ref`.
+2. A new commit cancels the previous run, except on `main`. Use the concurrency group key
+   `github.head_ref || github.ref`, or a key that never cancels a `main` run.
 3. An expensive job runs on `main`, on a schedule, and on a manual request only.
 4. A schedule runs no more often than the work needs, so prefer a weekly schedule.
 
@@ -307,11 +311,11 @@ a contract test for each workflow value that a future edit can remove.
 
 ## GitHub governance
 
-Branch protection on `main` requires each required check, linear history, and a pull request, and
-the repository removes the branch on merge. Dependabot keeps the dependencies and the workflow pins
-current, and it changes a pin and its release comment together. CodeQL examines the code where the
-repository has a CodeQL workflow, and branch protection requires its check. Use the `gh` command
-for GitHub operations.
+Where the plan permits, branch protection on `main` requires each required check, linear history,
+and a pull request. Without it, the pull request flow is still the rule. The repository removes the
+branch on merge. Dependabot keeps the dependencies and the workflow pins current, and it changes a
+pin and its release comment together. CodeQL examines the code where the repository has a CodeQL
+workflow, and branch protection requires its check. Use the `gh` command for GitHub operations.
 
 ## Agent efficiency and observability
 
@@ -341,16 +345,9 @@ for GitHub operations.
 ## Specifications
 
 Implement a one-file change, an automatic lint repair, a text-only change, or a test for behavior
-that exists without a specification. Write a specification first when a change touches three or
-more files or two or more classes. Also write one for a new integration, a division of a module,
-an unclear defect, or a destructive operation. Concurrency, performance, and schema work also need
-one. If you are not sure, write the specification, because a specification that is not necessary
-costs minutes and a large change without one costs hours. When the repository holds `.specify/`,
-use the Spec Kit workflow: `speckit.specify`, `speckit.plan`, `speckit.tasks`,
-`speckit.implement`, and `speckit.analyze`.
-
-## Rules for this repository
-
-Read `.github/copilot-instructions.md` for the rules that apply to this repository only. That file
-names the language, the local gates, the labels, the changelog fragment, and the container names
-and ports. It also names the files that only one agent changes at a time.
+that exists without a specification. Write a specification first when a change touches three or more
+files or two or more classes. Also write one for a new integration, a division of a module, an
+unclear defect, or a destructive operation. Concurrency, performance, and schema work also need one.
+If you are not sure, write the specification, because it costs minutes and a large change without
+one costs hours. When the repository holds `.specify/`, use the Spec Kit workflow:
+`speckit.specify`, `speckit.plan`, `speckit.tasks`, `speckit.implement`, and `speckit.analyze`.
