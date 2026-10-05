@@ -73,6 +73,18 @@ def test_insights_unknown_resolution_uses_seven_day_cache_key() -> None:
     assert "mist:insights:gw-1:wan0:7d" in client.values
 
 
+def test_vpn_peers_setter_and_getter_share_worker_key_format() -> None:
+    cache, client = make_cache()
+    peers = {"peers_by_port": {"wan0": [{"peer": "hub-1"}]}}
+
+    assert cache.set_vpn_peers("gw-1", "aabbccddeeff", peers, ttl=60)
+
+    assert list(client.values) == ["mist:vpn_peers:gw-1-aabbccddeeff"]
+    assert client.ttls["mist:vpn_peers:gw-1-aabbccddeeff"] == 60
+    assert cache.get_vpn_peers("gw-1", "aabbccddeeff") == peers
+    assert cache.get_vpn_peers("gw-1", "001122334455") is None
+
+
 def test_cache_stats_counts_ports_peers_and_skips_malformed_entries() -> None:
     cache, client = make_cache()
     cache.set_gateways(
