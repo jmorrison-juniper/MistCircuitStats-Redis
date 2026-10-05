@@ -322,6 +322,14 @@ class RedisCache:
 
     # ==================== VPN Peer Paths ====================
 
+    def _vpn_peers_key(self, gateway_id: str, mac: str) -> str:
+        """Build the Redis key for the VPN peers of one gateway.
+
+        The worker writes `{gateway_id}-{mac}` through set_all_vpn_peers, so the
+        single-gateway setter and getter use the same hyphen form.
+        """
+        return f"{self.PREFIX_VPN_PEERS}:{gateway_id}-{mac}"  # One format for all
+
     def set_vpn_peers(
         self,
         gateway_id: str,
@@ -331,10 +339,12 @@ class RedisCache:
     ) -> bool:
         """Store VPN peer paths for a gateway"""
         try:
-            key = f"{self.PREFIX_VPN_PEERS}:{gateway_id}:{mac}"
+            key = self._vpn_peers_key(gateway_id, mac)  # Same key as the getter
+            logger.info("Storing VPN peers for %s", gateway_id)  # Before the write
             self.client.setex(
                 key, ttl or self.DEFAULT_TTL, self._serialize(peers_by_port)
             )
+            logger.debug("Stored VPN peers at %s", key)  # Result of the write
             return True
         except Exception as e:
             logger.error("Error storing VPN peers for %s: %s", gateway_id, e)
@@ -343,7 +353,7 @@ class RedisCache:
     def get_vpn_peers(self, gateway_id: str, mac: str) -> dict[str, Any] | None:
         """Retrieve VPN peer paths for a gateway"""
         try:
-            key = f"{self.PREFIX_VPN_PEERS}:{gateway_id}-{mac}"
+            key = self._vpn_peers_key(gateway_id, mac)  # Same key as the setter
             data = self.client.get(key)
             return self._deserialize(data)
         except Exception as e:
