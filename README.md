@@ -13,8 +13,23 @@ running locally with **fictional offline sample data**, not production telemetry
 
 ## How
 
-Clone this repository, copy `.env.example` to `.env`, configure your Mist API
-tokens, then run `docker compose up -d`. Open <http://localhost:5000>.
+Install Git, Docker, and Docker Compose. Obtain a Mist API token.
+
+```sh
+git clone https://github.com/jmorrison-juniper/MistCircuitStats-Redis.git
+cd MistCircuitStats-Redis
+cp .env.example .env
+```
+
+In `.env`, rename `MIST_API_TOKEN` to `MIST_APITOKEN` and replace the example
+values with your Mist API token. The production [Compose file](docker-compose.yml)
+reads `MIST_APITOKEN`. For multiple tokens, separate them with commas.
+
+```sh
+docker compose up -d
+```
+
+Open <http://localhost:5000>. Wait for the first worker fetch to see Mist data.
 Only the background worker calls Mist; the web application reads Redis.
 
 See the [operations and development guide](docs/guide.md) for prerequisites,
