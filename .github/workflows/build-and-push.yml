@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-container-image.yml@da02d4c6a2163d1882f2ad25fce80b8ba38304d1 # v0.6.2
+    uses: jmorrison-juniper/misthelper-devtools/.github/workflows/reusable-container-image.yml@e8e093d205428b5503887267b6a9751fa7354be7 # v0.6.3
     with:
       image-name: ${{ github.repository_owner }}/mistcircuitstats-redis
       tags: |
